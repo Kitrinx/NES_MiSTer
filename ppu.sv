@@ -221,6 +221,15 @@ module SpriteSet(
 wire [26:0] load_out7, load_out6, load_out5, load_out4, load_out3, load_out2, load_out1, load_out0;
 wire [4:0] bits7, bits6, bits5, bits4, bits3, bits2, bits1, bits0;
 
+// Sprite sprite15(clk, ce, enable, load, load_in,   load_out7, bits7);
+// Sprite sprite14(clk, ce, enable, load, load_out7, load_out6, bits6);
+// Sprite sprite13(clk, ce, enable, load, load_out6, load_out5, bits5);
+// Sprite sprite12(clk, ce, enable, load, load_out5, load_out4, bits4);
+// Sprite sprite11(clk, ce, enable, load, load_out4, load_out3, bits3);
+// Sprite sprite10(clk, ce, enable, load, load_out3, load_out2, bits2);
+// Sprite  sprite9(clk, ce, enable, load, load_out2, load_out1, bits1);
+// Sprite  sprite8(clk, ce, enable, load, load_out1, load_out0, bits0);
+
 Sprite sprite7(clk, ce, enable, load, load_in,   load_out7, bits7);
 Sprite sprite6(clk, ce, enable, load, load_out7, load_out6, bits6);
 Sprite sprite5(clk, ce, enable, load, load_out6, load_out5, bits5);
@@ -244,6 +253,77 @@ assign bits =
 assign is_sprite0 = bits0[1:0] != 0;
 
 endmodule  // SpriteSet
+
+
+module SpriteEval(
+	input clk,
+	input ce,
+	input reset_line,          // OAM evaluator needs to be reset before processing is started.
+	input sprites_enabled,     // Set to 1 if evaluations are enabled
+	input exiting_vblank,      // Set to 1 when exiting vblank so spr_overflow can be reset
+	input obj_size,            // Set to 1 if objects are 16 pixels.
+	input [8:0] scanline,      // Current scan line (compared against Y)
+	input [8:0] cycle,         // Current cycle.
+	output reg [7:0] oam_bus,  // Current value on the OAM bus, returned to NES through $2004.
+	input oam_ptr_load,        // Load oam with specified value, when writing to NES $2003.
+	input oam_load,            // Load oam_ptr with specified value, when writing to NES $2004.
+	input [7:0] data_in,       // New value for oam or oam_ptr
+	output reg spr_overflow,   // Set to true if we had more than 8 objects on a scan line. Reset when exiting vblank.
+	output reg sprite0         // True if sprite#0 is included on the scan line currently being painted.
+);
+
+// typedef struct packed {
+// 	reg [7:0] y;
+// 	reg [7:0] index;
+// 	reg [7:0] attr;
+// 	reg [7:0] x;
+// } sprite;
+
+reg [0:255][7:0] oam;     // OAM RAM
+reg [0:63][7:0] oam_sec; // Secondary OAM RAM, with space for 8 extra sprites.
+reg oam_ptr[5:0];
+reg sec_ptr[3:0];
+reg sub_ptr [1:0];
+reg oam_done;
+
+
+wire is_odd = cycle[0];
+wire [6:0] offset = 0;
+// wire y_hit = (oam[{oam_ptr, 2'b00} + sub_ptr] == scanline[7:0]);
+
+// always_ff @(posedge clk)
+// if (reset) begin
+
+// end else if (ce) begin
+// 	if (cycle >= 0 && cycle <= 64 - offset) begin                    // Secondary Clear
+// 		oam_bus <= 8'hFF;
+// 		oam_sec <= {64{8'hFF}}; // Clear secondary OAM;
+// 		oam_ptr <= 0;
+// 		sec_ptr <= 0;
+// 	end else if (cycle > 64 - offset && cycle <= 256 - offset) begin // Sprite Evaluation
+// 		if (is_odd) begin // Odd, read from OAM ram
+// 			oam_bus <= oam[{oam_ptr, 2'b00} + sub_ptr];
+// 		end else begin // Even: Write to secondary OAM
+// 			if (~|sub_ptr || y_hit)
+// 				oam_sec[{sec_ptr, 2'b00} + sub_ptr] <= oam_bus;
+
+// 			if (&sub_ptr) begin
+// 				if (y_hit) sec_ptr <= sec_ptr + 1'b1;
+// 				if (oam_ptr == 63) oam_data <= 1'b1;
+// 				oam_ptr <= oam_ptr + 1'b1;
+// 			end
+// 			sub_ptr <= sub_ptr + 1'b1;
+// 		end
+// 	end else if (cycle > 256 - offset && cycle <= 320) begin         // Sprite Fetches
+
+// end
+
+// always_comb begin
+
+// end
+
+endmodule
+
 
 module SpriteRAM(
 	input clk,
