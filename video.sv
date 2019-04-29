@@ -301,14 +301,15 @@ wire is_padding = (hc > 255);
 
 wire dark_r, dark_g, dark_b;
 // bits are in order {B, G, R} color emphasis
+// Only effects range $00-$0D, $10-$1D, $20-$2D, and $30-$3D
 always_comb begin
 	{dark_r, dark_g, dark_b} = 3'b000;
 
-	if (~&color_ef[3:1] & |emphasis) begin
+	if (color_ef[3:0] < 'hE & |emphasis) begin
 		if (~&emphasis) begin
-			dark_r = ~emphasis[2];
+			dark_r = ~emphasis[0];
 			dark_g = ~emphasis[1];
-			dark_b = ~emphasis[0];
+			dark_b = ~emphasis[2];
 		end else begin
 			{dark_r, dark_g, dark_b} = 3'b111;
 		end

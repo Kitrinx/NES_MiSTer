@@ -42,7 +42,12 @@ reg [1:0] spr_state;
 reg [7:0] sprite_dma_lastval;
 reg [15:0] sprite_dma_addr;     // sprite dma source addr
 wire [8:0] new_sprite_dma_addr = sprite_dma_addr[7:0] + 8'h01;
-
+// 000111222333444555
+// oooEEEoooEEEoooEEEoooEEE
+// RRRAAAWWWSSS
+//    RRRAAAHHHWWWSSS
+// RRRHHHWWWSSS
+//    RRRWWWSSS
 always @(posedge clk) if (reset) begin
 	dmc_state <= 0;
 	spr_state <= 0;
@@ -53,7 +58,7 @@ end else if (ce) begin
 	if (dmc_state == 1 && !odd_cycle) dmc_state <= 0;
 
 	if (sprite_trigger) begin sprite_dma_addr <= {data_from_cpu, 8'h00}; spr_state <= 1; end
-	if (spr_state == 1 && cpu_read && odd_cycle) spr_state <= 3;
+	if (spr_state == 1 && odd_cycle) spr_state <= 3;
 	if (spr_state[1] && !odd_cycle && dmc_state == 1) spr_state <= 1;
 	if (spr_state[1] && odd_cycle) sprite_dma_addr[7:0] <= new_sprite_dma_addr[7:0];
 	if (spr_state[1] && odd_cycle && new_sprite_dma_addr[8]) spr_state <= 0;
