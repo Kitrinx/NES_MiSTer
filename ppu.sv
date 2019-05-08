@@ -114,7 +114,6 @@ module ClockGen(
 	input is_rendering,
 	output reg [8:0] scanline,
 	output reg [8:0] cycle,
-	output reg is_in_vblank,
 	output end_of_line,
 	output at_last_cycle_group,
 	output exiting_vblank,
@@ -131,23 +130,18 @@ assign at_last_cycle_group = (cycle[8:3] == 42);
 assign short_frame = end_of_line & skip_pixel;
 
 wire skip_pixel = is_pre_render && ~even_frame_toggle && is_rendering;
-assign end_of_line = at_last_cycle_group && (cycle[3:0] == (skip_pixel ? 3 : 4));
+assign end_of_line = at_last_cycle_group && (cycle[2:0] == (skip_pixel ? 3 : 4));
 
 // Confimed with Visual 2C02
 // All vblank clocked registers should have changed and be readable by cycle 1 of 241/261
 assign entering_vblank = (cycle == 0) && scanline == 241;
 assign exiting_vblank = (cycle == 0) && scanline == 511;
 
-// New value for is_in_vblank flag
-wire new_is_in_vblank = entering_vblank ? 1'b1 : exiting_vblank ? 1'b0 : is_in_vblank;
-
 // Set if the current line is line 0..239
 always @(posedge clk) if (reset) begin
 	cycle <= 0;
-	is_in_vblank <= 0;
 end else if (ce) begin
 	cycle <= end_of_line ? 1'd0 : cycle + 1'd1;
-	is_in_vblank <= new_is_in_vblank;
 end
 
 always @(posedge clk) if (reset) begin
@@ -330,7 +324,6 @@ module SpriteRAM(
 	input ce,
 	input reset_line,          // OAM evaluator needs to be reset before processing is started.
 	input sprites_enabled,     // Set to 1 if evaluations are enabled
-	input exiting_vblank,      // Set to 1 when exiting vblank so spr_overflow can be reset
 	input obj_size,            // Set to 1 if objects are 16 pixels.
 	input [8:0] scanline,      // Current scan line (compared against Y)
 	input [8:0] cycle,         // Current cycle.
@@ -445,7 +438,7 @@ always @(posedge clk) if (ce) begin
 		sprite0_curr <= 0;
 		sprite0 <= sprite0_curr;
 	end
-	if (cycle == 340 && scanline == 260) // Confirmed with visual 2C02. Effective by Line 261, pixel 1, but visible on 0.
+	if (cycle == 0 && scanline == 511) // Confirmed with visual 2C02. Effective by Line 261, pixel 1, but visible on 0.
 		spr_overflow <= 0;
 end
 
@@ -602,15 +595,25 @@ module PaletteRam
 );
 
 reg [5:0] palette [32] = '{
-	'h0F,'h2C,'h10,'h1C,
-	'h0F,'h37,'h27,'h07,
-	'h0F,'h28,'h16,'h07,
-	'h0F,'h28,'h0F,'h2C,
-	'h0F,'h0F,'h2C,'h11,
-	'h0F,'h0F,'h20,'h38,
-	'h0F,'h0F,'h15,'h27,
-	'h0F,'h0F,'h11,'h3C
+	'h09, 'h01, 'h00, 'h01,
+	'h00, 'h02, 'h02, 'h0D,
+	'h08, 'h10, 'h08, 'h24,
+	'h00, 'h00, 'h04, 'h2C,
+	'h09, 'h01, 'h34, 'h03,
+	'h00, 'h04, 'h00, 'h14,
+	'h08, 'h3A, 'h00, 'h02,
+	'h00, 'h20, 'h2C, 'h08
 };
+	// Old Palette:
+	// 'h0F,'h2C,'h10,'h1C,
+	// 'h0F,'h37,'h27,'h07,
+	// 'h0F,'h28,'h16,'h07,
+	// 'h0F,'h28,'h0F,'h2C,
+	// 'h0F,'h0F,'h2C,'h11,
+	// 'h0F,'h0F,'h20,'h38,
+	// 'h0F,'h0F,'h15,'h27,
+	// 'h0F,'h0F,'h11,'h3C
+
 
 // Force read from backdrop channel if reading from any addr 0.
 // Do this to the input, not here
@@ -657,7 +660,7 @@ reg obj_size; // 1 if sprites are 16 pixels high, else 0.
 reg vbl_enable;  // Enable VBL flag
 
 // These are stored in control register 1
-reg grayscale; // Disable color burst
+reg grayscale;          // Disable color burst
 reg playfield_clip;     // 0: Left side 8 pixels playfield clipping
 reg object_clip;        // 0: Left side 8 pixels object clipping
 
@@ -678,7 +681,6 @@ reg nmi_occured;         // True if NMI has occured but not cleared.
 reg [7:0] vram_latch;
 
 // Clock generator
-wire is_in_vblank;        // True if we're in VBLANK
 wire end_of_line;         // At the last pixel of a line
 wire at_last_cycle_group; // At the very last cycle group of the scan line.
 wire exiting_vblank;      // At the very last cycle of the vblank
@@ -687,7 +689,7 @@ wire is_pre_render_line;  // True while we're on the pre render scanline
 
 // Confirmed in Visual 2C02, rendering enabled is latched from bck_enable and spr_enable,
 // which are themselves registers. Therefor, there is one extra cycle of delay.
-reg rendering_enabled;
+wire rendering_enabled = (enable_objects | enable_playfield);
 
 // 2C02 has an "is_vblank" flag that is true from pixel 0 of line 241 to pixel 0 of line 0;
 wire is_rendering = rendering_enabled && (scanline < 240 || is_pre_render_line);
@@ -699,7 +701,6 @@ ClockGen clock(
 	.is_rendering        (rendering_enabled),
 	.scanline            (scanline),
 	.cycle               (cycle),
-	.is_in_vblank        (is_in_vblank),
 	.end_of_line         (end_of_line),
 	.at_last_cycle_group (at_last_cycle_group),
 	.exiting_vblank      (exiting_vblank),
@@ -756,7 +757,7 @@ wire before_line;
 always_comb begin
 	before_line = 0;
 	if (rendering_enabled)
-		if ((end_of_line && (scanline < 241 || is_pre_render_line)) || exiting_vblank)
+		if (end_of_line && (scanline < 241 || is_pre_render_line))
 			before_line = 1'b1;
 end
 
@@ -768,8 +769,7 @@ SpriteRAM sprite_ram(
 	.clk             (clk),
 	.ce              (ce),
 	.reset_line      (before_line),         // Condition for resetting the sprite line state.
-	.sprites_enabled (is_rendering),        // Condition for enabling sprite ram logic. Check so we're not on
-	.exiting_vblank  (exiting_vblank),
+	.sprites_enabled (rendering_enabled && scanline < 240),        // Condition for enabling sprite ram logic. Check so we're not on
 	.obj_size        (obj_size),
 	.scanline        (scanline),
 	.cycle           (cycle),
@@ -819,20 +819,21 @@ SpriteSet sprite_gen(
 wire show_obj_on_pixel = (object_clip || (cycle[7:3] != 0)) && enable_objects;
 wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_obj_on_pixel ? obj_pixel_noblank[1:0] : 2'b00};
 
+// https://wiki.nesdev.com/w/index.php/PPU_OAM#Sprite_zero_hits
 reg sprite0_hit_bg;            // True if sprite#0 has collided with the BG in the last frame.
 always @(posedge clk) if (ce) begin
-	rendering_enabled <= (enable_objects | enable_playfield);
-	if (cycle == 340 && scanline == 260) // confirmed with visual 2C02 (261, 1);
+	//rendering_enabled <= (enable_objects | enable_playfield);
+	if (cycle == 0 && scanline == 511) // confirmed with visual 2C02 (261, 1), visible at;
 		sprite0_hit_bg <= 0;
 	else if (
-		is_rendering        &&    // Object rendering is enabled
-		!cycle[8]           &&    // X Pixel 0..255
-		cycle[7:0] != 255   &&    // X pixel != 255
-		!is_pre_render_line &&    // Y Pixel 0..239
-		obj0_on_line        &&    // True if sprite#0 is included on the scan line.
-		is_obj0_pixel       &&    // True if the pixel came from tempram #0.
-		show_obj_on_pixel   &&
-		bg_pixel[1:0] != 0) begin // Background pixel nonzero.
+		(enable_objects & enable_playfield) &&    // Object rendering is enabled
+		scanline < 240                      &&    // Y Pixel 0..239
+		!cycle[8]                           &&    // X Pixel 0..255
+		cycle[7:0] != 255                   &&    // X pixel != 255
+		obj0_on_line                        &&    // True if sprite#0 is included on the scan line.
+		is_obj0_pixel                       &&    // True if the pixel came from tempram #0.
+		show_obj_on_pixel                   &&
+		bg_pixel[1:0] != 0) begin                 // Background pixel nonzero.
 
 			sprite0_hit_bg <= 1;
 	end
@@ -883,8 +884,11 @@ assign color = grayscale ? {color2[5:4], 4'b0} : color2;
 
 reg enable_playfield, enable_objects;
 
-always @(posedge clk)
-if (ce) begin
+always @(posedge clk) begin
+reg old_write;
+
+//if (ce) begin
+	old_write <= write;
 	if (reset) begin
 		{obj_patt, bg_patt, obj_size, vbl_enable} <= 0; // 2000 resets to 0
 		{grayscale, playfield_clip, object_clip, enable_playfield, enable_objects, emphasis} <= 0; // 2001 resets to 0
@@ -921,12 +925,15 @@ if (ce) begin
 end
 
 // If we're triggering a VBLANK NMI
-assign nmi = nmi_occured && vbl_enable;
+//assign nmi = nmi_occured && vbl_enable;
 
 // One cycle after vram_r was asserted, the value
 // is available on the bus.
+// Likewise with NMI, it should not be visible to the cpu until
+// scanline 241, cycle 1.
 reg vram_read_delayed;
 always @(posedge clk) if (ce) begin
+	nmi <= nmi_occured && vbl_enable && ~(read && ain == 2);
 	if (vram_read_delayed)
 		vram_latch <= vram_din;
 	vram_read_delayed <= vram_r_ppudata;
@@ -942,8 +949,14 @@ reg [23:0] decay_high;
 reg [23:0] decay_low;
 
 reg refresh_high, refresh_low;
+reg latched_vblank;
 
+// https://forums.nesdev.com/viewtopic.php?f=3&t=10029&start=15#p112846
+
+// The value of 2002 "locks" the moment M2 goes high
 always @(posedge clk) begin
+	reg old_read;
+
 	if (refresh_high) begin
 		decay_high = 3221590; // aprox 600ms decay rate
 		refresh_high <= 0;
@@ -964,14 +977,19 @@ always @(posedge clk) begin
 			decay_low <= decay_low - 1'b1;
 		else
 			latched_dout[4:0] <= 5'b00000;
+	end
 
+	if (~old_read & read)
+		latched_vblank <= nmi_occured;
+
+	old_read <= read;
 		if (read) begin
 			case (ain)
 				2: begin
-					latched_dout <= {nmi_occured,
-									sprite0_hit_bg,
-									sprite_overflow,
-									latched_dout[4:0]};
+					latched_dout <= {latched_vblank,
+						sprite0_hit_bg,
+						sprite_overflow,
+						latched_dout[4:0]};
 					refresh_high <= 1'b1;
 				end
 
@@ -1000,7 +1018,7 @@ always @(posedge clk) begin
 			refresh_low <= 1'b1;
 			latched_dout <= din;
 		end
-	end
+//	end
 end
 
 assign dout = latched_dout;

@@ -1349,6 +1349,68 @@ N106 n106(
 );
 
 //*****************************************************************************//
+// Name   : Waixing 162                                                        //
+// Mappers: 162                                                                //
+// Status : Working                                                            //
+// Notes  :                                                                    //
+// Games  : Zelda - San Shen Zhi Li                                            //
+//*****************************************************************************//
+Mapper162 map162(
+	.clk        (clk),
+	.ce         (ce),
+	.enable     (me[162] | me[163]),
+	.flags      (flags),
+	.prg_ain    (prg_ain),
+	.prg_aout_b (prg_addr_b),
+	.prg_read   (prg_read),
+	.prg_write  (prg_write),
+	.prg_din    (prg_din),
+	.prg_dout_b (prg_dout_b),
+	.prg_allow_b(prg_allow_b),
+	.chr_ain    (chr_ain),
+	.chr_aout_b (chr_addr_b),
+	.chr_read   (chr_read),
+	.chr_allow_b(chr_allow_b),
+	.vram_a10_b (vram_a10_b),
+	.vram_ce_b  (vram_ce_b),
+	.irq_b      (irq_b),
+	.flags_out_b(flags_out_b),
+	.audio_in   (audio_in),
+	.audio_b    (audio_out_b)
+);
+
+//*****************************************************************************//
+// Name   : Waixing 164                                                        //
+// Mappers: 164                                                                //
+// Status : Working                                                            //
+// Notes  :                                                                    //
+// Games  : Final Fantasy V                                                    //
+//*****************************************************************************//
+Mapper164 map164(
+	.clk        (clk),
+	.ce         (ce),
+	.enable     (me[164]),
+	.flags      (flags),
+	.prg_ain    (prg_ain),
+	.prg_aout_b (prg_addr_b),
+	.prg_read   (prg_read),
+	.prg_write  (prg_write),
+	.prg_din    (prg_din),
+	.prg_dout_b (prg_dout_b),
+	.prg_allow_b(prg_allow_b),
+	.chr_ain    (chr_ain),
+	.chr_aout_b (chr_addr_b),
+	.chr_read   (chr_read),
+	.chr_allow_b(chr_allow_b),
+	.vram_a10_b (vram_a10_b),
+	.vram_ce_b  (vram_ce_b),
+	.irq_b      (irq_b),
+	.flags_out_b(flags_out_b),
+	.audio_in   (audio_in),
+	.audio_b    (audio_out_b)
+);
+
+//*****************************************************************************//
 // Name   : FDS                                                                //
 // Mappers: 20                                                                 //
 // Status : Audio good. Drive mechanics okay, but dated. Needs rewrite.        //

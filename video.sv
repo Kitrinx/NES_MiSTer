@@ -249,7 +249,7 @@ always @(posedge clk) begin
 		hold_reset <= 1'b1;
 
 	if(pix_ce_n) begin
-		if((old_count_v == 511) && (count_v == 0)) begin
+		if((old_count_v == 261) && (count_v == 0)) begin
 			h <= 0;
 			v <= 0;
 			free_sync <= 0;
@@ -295,7 +295,7 @@ end
 localparam HBL_START = 268;
 localparam HBL_END   = 328;
 localparam VBL_START = 240;
-localparam VBL_END   = 511;
+localparam VBL_END   = 261;
 
 wire is_padding = (hc > 255);
 
