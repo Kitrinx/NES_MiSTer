@@ -201,7 +201,6 @@ endmodule  // SpriteGen
 // This contains all 8 sprites. Will return the pixel value of the highest prioritized sprite.
 // When load is set, and clocked, load_in is loaded into sprite 7 and all others are shifted down.
 // Sprite 0 has highest prio.
-// 226 LUTs, 68 Slices
 module SpriteSet(
 	input clk,
 	input ce,              // Input clock
@@ -214,15 +213,6 @@ module SpriteSet(
 
 wire [26:0] load_out7, load_out6, load_out5, load_out4, load_out3, load_out2, load_out1, load_out0;
 wire [4:0] bits7, bits6, bits5, bits4, bits3, bits2, bits1, bits0;
-
-// Sprite sprite15(clk, ce, enable, load, load_in,   load_out7, bits7);
-// Sprite sprite14(clk, ce, enable, load, load_out7, load_out6, bits6);
-// Sprite sprite13(clk, ce, enable, load, load_out6, load_out5, bits5);
-// Sprite sprite12(clk, ce, enable, load, load_out5, load_out4, bits4);
-// Sprite sprite11(clk, ce, enable, load, load_out4, load_out3, bits3);
-// Sprite sprite10(clk, ce, enable, load, load_out3, load_out2, bits2);
-// Sprite  sprite9(clk, ce, enable, load, load_out2, load_out1, bits1);
-// Sprite  sprite8(clk, ce, enable, load, load_out1, load_out0, bits0);
 
 Sprite sprite7(clk, ce, enable, load, load_in,   load_out7, bits7);
 Sprite sprite6(clk, ce, enable, load, load_out7, load_out6, bits6);
@@ -247,77 +237,6 @@ assign bits =
 assign is_sprite0 = bits0[1:0] != 0;
 
 endmodule  // SpriteSet
-
-
-module SpriteEval(
-	input clk,
-	input ce,
-	input reset_line,          // OAM evaluator needs to be reset before processing is started.
-	input sprites_enabled,     // Set to 1 if evaluations are enabled
-	input exiting_vblank,      // Set to 1 when exiting vblank so spr_overflow can be reset
-	input obj_size,            // Set to 1 if objects are 16 pixels.
-	input [8:0] scanline,      // Current scan line (compared against Y)
-	input [8:0] cycle,         // Current cycle.
-	output reg [7:0] oam_bus,  // Current value on the OAM bus, returned to NES through $2004.
-	input oam_ptr_load,        // Load oam with specified value, when writing to NES $2003.
-	input oam_load,            // Load oam_ptr with specified value, when writing to NES $2004.
-	input [7:0] data_in,       // New value for oam or oam_ptr
-	output reg spr_overflow,   // Set to true if we had more than 8 objects on a scan line. Reset when exiting vblank.
-	output reg sprite0         // True if sprite#0 is included on the scan line currently being painted.
-);
-
-// typedef struct packed {
-// 	reg [7:0] y;
-// 	reg [7:0] index;
-// 	reg [7:0] attr;
-// 	reg [7:0] x;
-// } sprite;
-
-reg [0:255][7:0] oam;     // OAM RAM
-reg [0:63][7:0] oam_sec; // Secondary OAM RAM, with space for 8 extra sprites.
-reg oam_ptr[5:0];
-reg sec_ptr[3:0];
-reg sub_ptr [1:0];
-reg oam_done;
-
-
-wire is_odd = cycle[0];
-wire [6:0] offset = 0;
-// wire y_hit = (oam[{oam_ptr, 2'b00} + sub_ptr] == scanline[7:0]);
-
-// always_ff @(posedge clk)
-// if (reset) begin
-
-// end else if (ce) begin
-// 	if (cycle >= 0 && cycle <= 64 - offset) begin                    // Secondary Clear
-// 		oam_bus <= 8'hFF;
-// 		oam_sec <= {64{8'hFF}}; // Clear secondary OAM;
-// 		oam_ptr <= 0;
-// 		sec_ptr <= 0;
-// 	end else if (cycle > 64 - offset && cycle <= 256 - offset) begin // Sprite Evaluation
-// 		if (is_odd) begin // Odd, read from OAM ram
-// 			oam_bus <= oam[{oam_ptr, 2'b00} + sub_ptr];
-// 		end else begin // Even: Write to secondary OAM
-// 			if (~|sub_ptr || y_hit)
-// 				oam_sec[{sec_ptr, 2'b00} + sub_ptr] <= oam_bus;
-
-// 			if (&sub_ptr) begin
-// 				if (y_hit) sec_ptr <= sec_ptr + 1'b1;
-// 				if (oam_ptr == 63) oam_data <= 1'b1;
-// 				oam_ptr <= oam_ptr + 1'b1;
-// 			end
-// 			sub_ptr <= sub_ptr + 1'b1;
-// 		end
-// 	end else if (cycle > 256 - offset && cycle <= 320) begin         // Sprite Fetches
-
-// end
-
-// always_comb begin
-
-// end
-
-endmodule
-
 
 module SpriteRAM(
 	input clk,
@@ -595,25 +514,15 @@ module PaletteRam
 );
 
 reg [5:0] palette [32] = '{
-	'h09, 'h01, 'h00, 'h01,
-	'h00, 'h02, 'h02, 'h0D,
-	'h08, 'h10, 'h08, 'h24,
-	'h00, 'h00, 'h04, 'h2C,
-	'h09, 'h01, 'h34, 'h03,
-	'h00, 'h04, 'h00, 'h14,
-	'h08, 'h3A, 'h00, 'h02,
-	'h00, 'h20, 'h2C, 'h08
+	'h0F,'h2C,'h10,'h1C,
+	'h0F,'h37,'h27,'h07,
+	'h0F,'h28,'h16,'h07,
+	'h0F,'h28,'h0F,'h2C,
+	'h0F,'h0F,'h2C,'h11,
+	'h0F,'h0F,'h20,'h38,
+	'h0F,'h0F,'h15,'h27,
+	'h0F,'h0F,'h11,'h3C
 };
-	// Old Palette:
-	// 'h0F,'h2C,'h10,'h1C,
-	// 'h0F,'h37,'h27,'h07,
-	// 'h0F,'h28,'h16,'h07,
-	// 'h0F,'h28,'h0F,'h2C,
-	// 'h0F,'h0F,'h2C,'h11,
-	// 'h0F,'h0F,'h20,'h38,
-	// 'h0F,'h0F,'h15,'h27,
-	// 'h0F,'h0F,'h11,'h3C
-
 
 // Force read from backdrop channel if reading from any addr 0.
 // Do this to the input, not here
@@ -689,7 +598,7 @@ wire is_pre_render_line;  // True while we're on the pre render scanline
 
 // Confirmed in Visual 2C02, rendering enabled is latched from bck_enable and spr_enable,
 // which are themselves registers. Therefor, there is one extra cycle of delay.
-wire rendering_enabled = (enable_objects | enable_playfield);
+reg rendering_enabled;
 
 // 2C02 has an "is_vblank" flag that is true from pixel 0 of line 241 to pixel 0 of line 0;
 wire is_rendering = rendering_enabled && (scanline < 240 || is_pre_render_line);
@@ -822,8 +731,8 @@ wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_obj_on_pixel ? obj_pixel_no
 // https://wiki.nesdev.com/w/index.php/PPU_OAM#Sprite_zero_hits
 reg sprite0_hit_bg;            // True if sprite#0 has collided with the BG in the last frame.
 always @(posedge clk) if (ce) begin
-	//rendering_enabled <= (enable_objects | enable_playfield);
-	if (cycle == 0 && scanline == 511) // confirmed with visual 2C02 (261, 1), visible at;
+	rendering_enabled <= (enable_objects | enable_playfield);
+	if (cycle == 1 && scanline == 511) // confirmed with visual 2C02 (261, 1);
 		sprite0_hit_bg <= 0;
 	else if (
 		(enable_objects & enable_playfield) &&    // Object rendering is enabled
@@ -885,10 +794,6 @@ assign color = grayscale ? {color2[5:4], 4'b0} : color2;
 reg enable_playfield, enable_objects;
 
 always @(posedge clk) begin
-reg old_write;
-
-//if (ce) begin
-	old_write <= write;
 	if (reset) begin
 		{obj_patt, bg_patt, obj_size, vbl_enable} <= 0; // 2000 resets to 0
 		{grayscale, playfield_clip, object_clip, enable_playfield, enable_objects, emphasis} <= 0; // 2001 resets to 0
@@ -924,15 +829,13 @@ reg old_write;
 		nmi_occured <= 0;
 end
 
-// If we're triggering a VBLANK NMI
-//assign nmi = nmi_occured && vbl_enable;
-
 // One cycle after vram_r was asserted, the value
 // is available on the bus.
 // Likewise with NMI, it should not be visible to the cpu until
 // scanline 241, cycle 1.
 reg vram_read_delayed;
 always @(posedge clk) if (ce) begin
+	// If we're triggering a VBLANK NMI
 	nmi <= nmi_occured && vbl_enable && ~(read && ain == 2);
 	if (vram_read_delayed)
 		vram_latch <= vram_din;
@@ -983,42 +886,41 @@ always @(posedge clk) begin
 		latched_vblank <= nmi_occured;
 
 	old_read <= read;
-		if (read) begin
-			case (ain)
-				2: begin
-					latched_dout <= {latched_vblank,
-						sprite0_hit_bg,
-						sprite_overflow,
-						latched_dout[4:0]};
-					refresh_high <= 1'b1;
-				end
+	if (read) begin
+		case (ain)
+			2: begin
+				latched_dout <= {latched_vblank,
+					sprite0_hit_bg,
+					sprite_overflow,
+					latched_dout[4:0]};
+				refresh_high <= 1'b1;
+			end
 
-				4: begin
-					latched_dout <= oam_bus;
+			4: begin
+				latched_dout <= oam_bus;
+				refresh_high <= 1'b1;
+				refresh_low <= 1'b1;
+			end
+
+			7: if (is_pal_address) begin
+					latched_dout <= {latched_dout[7:6], color};
+					refresh_low <= 1'b1;
+				end else begin
+					latched_dout <= vram_latch;
 					refresh_high <= 1'b1;
 					refresh_low <= 1'b1;
 				end
+			default: latched_dout <= latched_dout;
+		endcase
 
-				7: if (is_pal_address) begin
-						latched_dout <= {latched_dout[7:6], color};
-						refresh_low <= 1'b1;
-					end else begin
-						latched_dout <= vram_latch;
-						refresh_high <= 1'b1;
-						refresh_low <= 1'b1;
-					end
-				default: latched_dout <= latched_dout;
-			endcase
+		if (reset)
+			latched_dout <= 8'd0;
 
-			if (reset)
-				latched_dout <= 8'd0;
-
-		end else if (write) begin
-			refresh_high <= 1'b1;
-			refresh_low <= 1'b1;
-			latched_dout <= din;
-		end
-//	end
+	end else if (write) begin
+		refresh_high <= 1'b1;
+		refresh_low <= 1'b1;
+		latched_dout <= din;
+	end
 end
 
 assign dout = latched_dout;

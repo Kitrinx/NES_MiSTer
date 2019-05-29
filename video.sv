@@ -299,22 +299,21 @@ localparam VBL_END   = 261;
 
 wire is_padding = (hc > 255);
 
-wire dark_r, dark_g, dark_b;
+reg dark_r, dark_g, dark_b;
 // bits are in order {B, G, R} color emphasis
-// Only effects range $00-$0D, $10-$1D, $20-$2D, and $30-$3D
-always_comb begin
-	{dark_r, dark_g, dark_b} = 3'b000;
+// Only effects range $00-$0D, $10-$1D, $20-$2D, and $30-$3D, however this seems wrong
+always @(posedge clk) if (pix_ce_n) begin
+	{dark_r, dark_g, dark_b} <= 3'b000;
 
-	if (color_ef[3:0] < 'hE & |emphasis) begin
+	if ((color_ef[3:0] < 4'hE) && |emphasis) begin
 		if (~&emphasis) begin
-			dark_r = ~emphasis[0];
-			dark_g = ~emphasis[1];
-			dark_b = ~emphasis[2];
+			dark_r <= ~emphasis[0];
+			dark_g <= ~emphasis[1];
+			dark_b <= ~emphasis[2];
 		end else begin
-			{dark_r, dark_g, dark_b} = 3'b111;
+			{dark_r, dark_g, dark_b} <= 3'b111;
 		end
 	end
-
 end
 
 wire  [4:0] vga_r = dark_r ? pixel[4:1] + pixel[4:2] : pixel[4:0];
