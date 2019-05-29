@@ -34,7 +34,7 @@ module DmaController(
 	output read,                   // 1 = read, 0 = write
 	output [7:0] data_to_ram,      // Value to write to RAM
 	output dmc_ack,                // ACK the DMC DMA
-	output pause_cpu               // CPU is paused
+	output pause_cpu               // CPU is pausede
 );
 
 reg dmc_state;
@@ -128,7 +128,10 @@ module NES(
 	output  [1:0] joypad_clock,   // Set to 1 for each joypad to clock it.
 	input   [3:0] joypad_data,    // Data for each joypad + 1 powerpad.
 	input         mic,            // Microphone RNG
-	input         fds_swap,
+	input         fds_busy,       // FDS Disk Swap Busy
+	input         fds_swap,       // FDS Disk Swap Pause
+	output  [1:0] diskside_req,
+	input   [1:0] diskside,
 	input   [4:0] audio_channels, // Enabled audio channels
 
 	// Access signals for the SRAM.
@@ -152,7 +155,10 @@ module NES(
 	input         int_audio,
 	input         ext_audio,
 	output        apu_ce,
-	input   [1:0] gg,
+	input         gg,
+	input [128:0] gg_code,
+	output        gg_avail,
+	input         gg_reset,
 	output  [2:0] emphasis,
 	output        save_written
 );
@@ -194,9 +200,9 @@ module NES(
 assign nes_div = div_sys;
 assign apu_ce = cpu_ce;
 
-wire reset = reset_nes | reset_gg;
+wire reset = reset_nes;
 
-reg [7:0] from_data_bus;
+wire [7:0] from_data_bus;
 wire [7:0] cpu_dout;
 
 // odd or even apu cycle, AKA div_apu or apu_/clk2. This is actually not 50% duty cycle. It is high for 18
@@ -437,17 +443,14 @@ wire [21:0] prg_linaddr, chr_linaddr;
 wire [7:0] prg_dout_mapper, chr_from_ppu_mapper;
 wire has_chr_from_ppu_mapper;
 wire [15:0] sample_ext;
-wire reset_gg;
 
-assign save_written = (prg_addr[15:13] == 3'b011 && prg_write) | bram_write;
+assign save_written = (mapper_flags[7:0] == 8'h14) ? (prg_linaddr[21:18] == 4'b1111 && prg_write) : (prg_addr[15:13] == 3'b011 && prg_write) | bram_write;
 
 cart_top multi_mapper (
 	// FPGA specific
 	.clk               (clk),
 	.reset             (reset),
-	.reset_gg          (reset_gg),
-	.cold_reset        (cold_reset),
-	.flags_in          (mapper_flags),            // iNES header data (use 0 while loading)
+	.flags             (mapper_flags),            // iNES header data (use 0 while loading)
 	// Cart pins (slightly abstracted)
 	.ce                (cart_ce & ~reset),        // M2 (held in high impedance during reset)
 	.prg_ain           (prg_addr),                // CPU Address in (a15 abstracted from ROMSEL)
@@ -476,7 +479,6 @@ cart_top multi_mapper (
 	.mapper_data_out   (bram_dout),
 	.mapper_prg_write  (bram_write),
 	.mapper_ovr        (bram_override),
-	.code              (code),
 	// Cheats
 	.prg_from_ram      (from_data_bus),           // Hacky cpu din <= get rid of this!
 	.ppuflags          (mapper_ppu_flags),        // Cheat for MMC5
@@ -485,32 +487,28 @@ cart_top multi_mapper (
 	.has_chr_dout      (has_chr_from_ppu_mapper), // Output specific data for CHR rather than from SDRAM
 	.prg_open_bus      (prg_open_bus),            // Simulate open bus
 	.prg_conflict      (prg_conflict),            // Simulate bus conflicts
-	// User input
-	.gg                (gg),                      // Enable Game Genie
-	.fds_swap          (fds_swap)                 // Used to trigger FDS disk changes
+	// User input/FDS controls
+	.fds_swap          (fds_swap),                // Used to trigger FDS disk changes
+	.fds_busy          (fds_busy),                // Used to trigger FDS disk changes
+	.diskside_auto     (diskside_req),
+	.diskside          (diskside)
 );
 
-wire [37:0] code;
 wire genie_ovr;
 wire [7:0] genie_data;
 
-geniecodes codes (
+CODES codes (
 	.clk        (clk),
-	.reset      (cold_reset),
-	.enable     (|gg),
-	.addr_in    (prg_addr),
+	.reset      (gg_reset),
+	.enable     (~gg),
+	.addr_in    (addr),
 	.data_in    (prg_allow ? memory_din_cpu : prg_dout_mapper),
-	.code       (code),
-	.extra_codes(gg[1]),
+	.code       (gg_code),
+	.available  (gg_avail),
 	.genie_ovr  (genie_ovr),
 	.genie_data (genie_data)
 );
 
-wire cold_reset = (old_flags != mapper_flags);
-
-reg [31:0] old_flags;
-always @(posedge clk) if (cpu_ce)
-	old_flags <= mapper_flags;
 
 /**********************************************************/
 /*************       Bus Arbitration        ***************/
@@ -546,28 +544,30 @@ always @(posedge clk) begin
 	open_bus_data <= from_data_bus;
 end
 
+assign from_data_bus = genie_ovr ? genie_data : raw_data_bus;
+
+reg [7:0] raw_data_bus;
+
 always @* begin
 	if (reset)
-		from_data_bus = 0;
+		raw_data_bus = 0;
 	else if (apu_cs) begin
 		if (joypad1_cs)
-			from_data_bus = {open_bus_data[7:5], 2'b0, mic, 1'b0, joypad_data[0]};
+			raw_data_bus = {open_bus_data[7:5], 2'b0, mic, 1'b0, joypad_data[0]};
 		else if (joypad2_cs)
-			from_data_bus = {open_bus_data[7:5], joypad_data[3:2], 2'b00, joypad_data[1]};
+			raw_data_bus = {open_bus_data[7:5], joypad_data[3:2], 2'b00, joypad_data[1]};
 		else
-			from_data_bus = (addr == 16'h4015) ? apu_dout : open_bus_data;
+			raw_data_bus = (addr == 16'h4015) ? apu_dout : open_bus_data;
 	end else if (bus_is_open) begin
-		from_data_bus = open_bus_data;
+		raw_data_bus = open_bus_data;
 	end else if (ppu_cs) begin
-		from_data_bus = ppu_dout;
-	end else if (genie_ovr) begin
-		from_data_bus = genie_data;
+		raw_data_bus = ppu_dout;
 	end else if (prg_allow) begin
-		from_data_bus = memory_din_cpu;
+		raw_data_bus = memory_din_cpu;
 	end else if (prg_open_bus) begin
-		from_data_bus = open_bus_data;
+		raw_data_bus = open_bus_data;
 	end else begin
-		from_data_bus = prg_dout_mapper;
+		raw_data_bus = prg_dout_mapper;
 	end
 end
 

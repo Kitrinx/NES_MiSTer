@@ -20,10 +20,8 @@ module cart_top (
 	input             ce,
 	input             ppu_ce,
 	input             reset,
-	output            reset_gg,
-	input             cold_reset,
 	input      [19:0] ppuflags,       // Misc flags from PPU for MMC5 cheating
-	input      [31:0] flags_in,       // Misc flags from ines header {prg_size(3), chr_size(3), mapper(8)}
+	input      [31:0] flags,          // Misc flags from ines header {prg_size(3), chr_size(3), mapper(8)}
 	input      [15:0] prg_ain,        // Better known as "CPU Address in"
 	output reg [21:0] prg_aout,       // PRG Input / Output Address Lines
 	input             prg_read,       // PRG Read / write signals
@@ -44,16 +42,17 @@ module cart_top (
 	output reg        chr_allow,      // CHR Allow write
 	output reg        vram_a10,       // CHR Value for A10 address line
 	output reg        vram_ce,        // CHR True if the address should be routed to the internal 2kB VRAM.
-	output reg [14:0] mapper_addr,
+	output reg [15:0] mapper_addr,
 	input       [7:0] mapper_data_in,
 	output reg  [7:0] mapper_data_out,
 	output reg        mapper_prg_write,
 	output reg        mapper_ovr,
-	output reg [37:0] code,
 	output reg        irq,
-	input       [1:0] gg,
 	input      [15:0] audio_in,
 	output reg [15:0] audio,          // External Audio
+	output reg  [1:0] diskside_auto,
+	input       [1:0] diskside,
+	input             fds_busy,       // FDS Disk Swap Busy
 	input             fds_swap        // FDS Disk Swap Pause
 );
 
@@ -445,7 +444,7 @@ Mapper15 map15(
 //*****************************************************************************//
 wire map16_prg_write, map16_ovr;
 wire [7:0] map16_data_out;
-wire [14:0] map16_mapper_addr;
+wire [15:0] map16_mapper_addr;
 Mapper16 map16(
 	.clk        (clk),
 	.ce         (ce),
@@ -1417,6 +1416,7 @@ Mapper164 map164(
 // Notes  : Uses a special wire to signal disk changes. Req. modified BIOS.    //
 // Games  : Bio Miracle for audio, Various unlicensed games for compatibility. //
 //*****************************************************************************//
+tri0 [1:0] fds_diskside_auto;
 MapperFDS mapfds(
 	.clk        (clk),
 	.ce         (ce),
@@ -1440,50 +1440,10 @@ MapperFDS mapfds(
 	.audio_in   (audio_in),
 	.audio_b    (audio_out_b),
 	// Special ports
+	.diskside_auto_b (fds_diskside_auto),
+	.diskside   (diskside),
+	.fds_busy   (fds_busy),
 	.fds_swap   (fds_swap)
-);
-
-wire hijack;
-wire [31:0] flags;
-reg [7:0] genie_prg = 0;
-reg [7:0] genie_chr = 0;
-reg genie_toggle;
-wire [7:0] genie_dout;
-
-// Alternate between latching prg and chr.
-always_ff @(posedge clk) begin
-	genie_toggle <= ~genie_toggle;
-	if (genie_toggle)
-		genie_chr <= genie_dout;
-	else
-		genie_prg <= genie_dout;
-end
-
-// Game genie is not a mapper in the traditional sense. It hijacks the data bus
-// until it has finished entering codes, then allows the cart data to execute. As
-// its program rom runs, it uses mapper 0.
-
-gamegenie genie (
-	.clk             (clk),
-	.ce              (ce),
-	.addr_in         (prg_ain),
-	.data_in         (prg_din),
-	.write           (prg_write),
-	.enable          (|gg),
-	.reset_gg        (reset_gg),
-	.extra_codes     (gg[1]),
-	.reset           (cold_reset),
-	.code            (code),
-	.mapper_data_in  (flags_in),
-	.mapper_data_out (flags),
-	.hijack          (hijack)
-);
-
-// See the note in gamegenie.sv about the use of this ROM
-genierom genierom (
-	.clock(clk),
-	.address(genie_toggle ? {7'b100_0000, chr_ain[7:0]} : {1'b0, prg_ain[13:0]}),
-	.q(genie_dout)
 );
 
 wire [5:0] prg_mask;
@@ -1491,7 +1451,7 @@ wire [6:0] chr_mask;
 wire [255:0] me;
 
 always @* begin
-	me = 255'd0;
+	me = 256'd0;
 	me[flags[7:0]] = 1'b1;
 
 	case(flags[10:8])
@@ -1516,19 +1476,17 @@ always @* begin
 	endcase
 
 	// Mapper output to cart pins
-	if (hijack) begin
-		{prg_aout,   prg_allow, chr_aout,   vram_a10,   vram_ce,   chr_allow,   prg_dout,   chr_dout,   irq,   audio} =
-		{prg_addr_b, 1'b0,      chr_addr_b, vram_a10_b, vram_ce_b, chr_allow_b, genie_prg,  genie_chr,  irq_b, audio_out_b};
-	end else begin
-		{prg_aout,   prg_allow,   chr_aout,   vram_a10,   vram_ce,   chr_allow,   prg_dout,   chr_dout,   irq,   audio} =
-		{prg_addr_b, prg_allow_b, chr_addr_b, vram_a10_b, vram_ce_b, chr_allow_b, prg_dout_b, chr_dout_b, irq_b, audio_out_b};
-	end
+	{prg_aout,   prg_allow,   chr_aout,   vram_a10,   vram_ce,   chr_allow,   prg_dout,   chr_dout,   irq,   audio} =
+	{prg_addr_b, prg_allow_b, chr_addr_b, vram_a10_b, vram_ce_b, chr_allow_b, prg_dout_b, chr_dout_b, irq_b, audio_out_b};
+
 	// Currently only used for Mapper 16 EEPROM. Expand if needed.
 	{mapper_addr, mapper_data_out, mapper_prg_write, mapper_ovr} = (me[159] | me[16]) ?
-		{map16_mapper_addr, map16_data_out, map16_prg_write, map16_ovr} : 25'd0;
+		{map16_mapper_addr, map16_data_out, map16_prg_write, map16_ovr} : 26'd0;
+
+	{diskside_auto} = {fds_diskside_auto};
 
 	// Behavior helper flags
-	{prg_conflict, prg_open_bus, has_chr_dout} = {flags_out_b[2], flags_out_b[1], flags_out_b[0] | (hijack & ~vram_ce)};
+	{prg_conflict, prg_open_bus, has_chr_dout} = {flags_out_b[2], flags_out_b[1], flags_out_b[0]};
 
 	// Address translation for SDRAM
 	if (prg_aout[21:20] == 2'b00)
