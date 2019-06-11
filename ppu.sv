@@ -1,12 +1,12 @@
 // Copyright (c) 2012-2013 Ludvig Strigeus
 // This program is GPL Licensed. See COPYING for the full license.
 
+// altera message_off 10935
+
 // Module handles updating the loopy scroll register
 module LoopyGen (
 	input clk,
 	input ce,
-	input reset,
-	input not_ready,
 	input is_rendering,
 	input [2:0] ain,     // input address from CPU
 	input [7:0] din,     // data input
@@ -38,13 +38,7 @@ initial begin
 end
 
 // Handle updating loopy_t and loopy_v
-always @(posedge clk) if (reset) begin
-	ppu_incr <= 0;
-	loopy_v <= 0;
-	loopy_t <= 0;
-	loopy_x <= 0;
-	ppu_address_latch <= 0;
-end else if (ce) begin
+always @(posedge clk) if (ce) begin
 	if (is_rendering) begin
 		// Increment course X scroll right after attribute table byte was fetched.
 		if (cycle[2:0] == 3 && (cycle < 256 || cycle >= 320 && cycle < 336)) begin
@@ -71,16 +65,16 @@ end else if (ce) begin
 
 		// On cycle 256 of each scanline, copy horizontal bits from loopy_t into loopy_v
 		// On cycle 304 of the pre-render scanline, copy loopy_t into loopy_v
-		if (cycle >= 280 && cycle <= 304 && is_pre_render) begin
+		if (cycle == 304 && is_pre_render) begin
 			loopy_v <= loopy_t;
 		end
 	end
 
-	if (write && ain == 0 && ~not_ready) begin
+	if (write && ain == 0) begin
 		loopy_t[10] <= din[0];
 		loopy_t[11] <= din[1];
 		ppu_incr <= din[2];
-	end else if (write && ain == 5 && ~not_ready) begin
+	end else if (write && ain == 5) begin
 		if (!ppu_address_latch) begin
 			loopy_t[4:0] <= din[7:3];
 			loopy_x <= din[2:0];
@@ -89,7 +83,7 @@ end else if (ce) begin
 			loopy_t[14:12] <= din[2:0];
 		end
 		ppu_address_latch <= !ppu_address_latch;
-	end else if (write && ain == 6 && ~not_ready) begin
+	end else if (write && ain == 6) begin
 		if (!ppu_address_latch) begin
 			loopy_t[13:8] <= din[5:0];
 			loopy_t[14] <= 0;
@@ -120,6 +114,7 @@ module ClockGen(
 	input is_rendering,
 	output reg [8:0] scanline,
 	output reg [8:0] cycle,
+	output reg is_in_vblank,
 	output end_of_line,
 	output at_last_cycle_group,
 	output exiting_vblank,
@@ -136,18 +131,23 @@ assign at_last_cycle_group = (cycle[8:3] == 42);
 assign short_frame = end_of_line & skip_pixel;
 
 wire skip_pixel = is_pre_render && ~even_frame_toggle && is_rendering;
-assign end_of_line = at_last_cycle_group && (cycle[2:0] == (skip_pixel ? 3 : 4));
+assign end_of_line = at_last_cycle_group && (cycle[3:0] == (skip_pixel ? 3 : 4));
 
 // Confimed with Visual 2C02
 // All vblank clocked registers should have changed and be readable by cycle 1 of 241/261
 assign entering_vblank = (cycle == 0) && scanline == 241;
-assign exiting_vblank = (cycle == 0) && scanline == 261;
+assign exiting_vblank = (cycle == 0) && scanline == 511;
+
+// New value for is_in_vblank flag
+wire new_is_in_vblank = entering_vblank ? 1'b1 : exiting_vblank ? 1'b0 : is_in_vblank;
 
 // Set if the current line is line 0..239
 always @(posedge clk) if (reset) begin
 	cycle <= 0;
+	is_in_vblank <= 0;
 end else if (ce) begin
 	cycle <= end_of_line ? 1'd0 : cycle + 1'd1;
+	is_in_vblank <= new_is_in_vblank;
 end
 
 always @(posedge clk) if (reset) begin
@@ -156,7 +156,7 @@ always @(posedge clk) if (reset) begin
 	even_frame_toggle <= 0; // Resets to 0, the first frame will always end with 341 pixels.
 end else if (ce && end_of_line) begin
 	// Once the scanline counter reaches end of 260, it gets reset to -1.
-	scanline <= (scanline == 261) ? 9'd0 : scanline + 1'd1;
+	scanline <= (scanline == 260) ? 9'b111111111 : scanline + 1'd1;
 	// The pre render flag is set while we're on scanline -1.
 	is_pre_render <= (scanline == 260);
 
@@ -207,6 +207,7 @@ endmodule  // SpriteGen
 // This contains all 8 sprites. Will return the pixel value of the highest prioritized sprite.
 // When load is set, and clocked, load_in is loaded into sprite 7 and all others are shifted down.
 // Sprite 0 has highest prio.
+// 226 LUTs, 68 Slices
 module SpriteSet(
 	input clk,
 	input ce,              // Input clock
@@ -249,6 +250,7 @@ module SpriteRAM(
 	input ce,
 	input reset_line,          // OAM evaluator needs to be reset before processing is started.
 	input sprites_enabled,     // Set to 1 if evaluations are enabled
+	input exiting_vblank,      // Set to 1 when exiting vblank so spr_overflow can be reset
 	input obj_size,            // Set to 1 if objects are 16 pixels.
 	input [8:0] scanline,      // Current scan line (compared against Y)
 	input [8:0] cycle,         // Current cycle.
@@ -355,7 +357,6 @@ always @(posedge clk) if (ce) begin
 		4'b10_?_?: state <= 2'b10;  // Stuck in state 2.
 		endcase
 	end
-
 	if (reset_line) begin
 		state <= 0;
 		p <= 0;
@@ -364,7 +365,7 @@ always @(posedge clk) if (ce) begin
 		sprite0_curr <= 0;
 		sprite0 <= sprite0_curr;
 	end
-	if (cycle == 340 && scanline == 260) // Confirmed with visual 2C02. Effective by Line 261, pixel 1.
+	if (cycle == 340 && scanline == 260) // Confirmed with visual 2C02. Effective by Line 261, pixel 1, but visible on 0.
 		spr_overflow <= 0;
 end
 
@@ -416,8 +417,7 @@ assign load_in = {vram_f, vram_f, temp, temp[1:0], temp[5]};
 // range result value are always used as the fine vertical offset into the
 // selected pattern.
 assign vram_addr = {obj_size ? temp_tile[0] : obj_patt,
-	temp_tile[7:1], obj_size ? y_f[3] : temp_tile[0], cycle[1], y_f[2:0] };
-
+										temp_tile[7:1], obj_size ? y_f[3] : temp_tile[0], cycle[1], y_f[2:0] };
 always @(posedge clk) if (ce) begin
 	if (load_y) temp_y <= temp[3:0];
 	if (load_tile) temp_tile <= temp;
@@ -548,7 +548,6 @@ endmodule  // PaletteRam
 module PPU(
 	input clk,
 	input ce,
-	input cpu_ce,
 	input reset,          // input clock  21.48 MHz / 4. 1 clock cycle = 1 pixel
 	output [5:0] color,   // output color value, one pixel outputted every clock
 	input [7:0] din,      // input data from bus
@@ -556,7 +555,7 @@ module PPU(
 	input [2:0] ain,      // input address from CPU
 	input read,           // read
 	input write,          // write
-	output nmi,       // one while inside vblank
+	output reg nmi,       // one while inside vblank
 	input pre_read,
 	input pre_write,
 	output vram_r,        // read from vram active
@@ -575,55 +574,40 @@ module PPU(
 reg obj_patt; // Object pattern table
 reg bg_patt;  // Background pattern table
 reg obj_size; // 1 if sprites are 16 pixels high, else 0.
-reg nmi_enable;  // Enable VBL flag
+reg vbl_enable;  // Enable VBL flag
 
 // These are stored in control register 1
-reg grayscale;          // Disable color burst
-reg bkg_clip;     // 0: Left side 8 pixels playfield clipping
-reg spr_clip;        // 0: Left side 8 pixels object clipping
+reg grayscale; // Disable color burst
+reg playfield_clip;     // 0: Left side 8 pixels playfield clipping
+reg object_clip;        // 0: Left side 8 pixels object clipping
 
 initial begin
 	obj_patt = 0;
 	bg_patt = 0;
 	obj_size = 0;
-	nmi_enable = 0;
+	vbl_enable = 0;
 	grayscale = 0;
-	bkg_clip = 0;
-	spr_clip = 0;
-	bkg_enable = 0;
-	spr_enable = 0;
+	playfield_clip = 0;
+	object_clip = 0;
+	enable_playfield = 0;
+	enable_objects = 0;
 	emphasis = 0;
 end
 
-reg vbl_flag;         // True if NMI has occured but not cleared.
+reg nmi_occured;         // True if NMI has occured but not cleared.
 reg [7:0] vram_latch;
 
 // Clock generator
+wire is_in_vblank;        // True if we're in VBLANK
 wire end_of_line;         // At the last pixel of a line
 wire at_last_cycle_group; // At the very last cycle group of the scan line.
 wire exiting_vblank;      // At the very last cycle of the vblank
 wire entering_vblank;     //
 wire is_pre_render_line;  // True while we're on the pre render scanline
 
-
-int cpu_reset = 0;
-wire not_ready = |cpu_reset;
-
-always @(posedge clk) if (reset) begin
-	cpu_reset <= 'd29658; // 33132 for PAL
-end else if (cpu_ce && cpu_reset > 0) begin
-	cpu_reset <= cpu_reset - 1'd1;
-end
-
-// Confirmed in Visual 2C02, rendering enabled is latched from bkg_enable and spr_enable,
-// which are themselves registers. Therefor, there is one extra cycle of delay UNLESS
-// sprite rendering is disabled, ie we are on the pre-render scanline.
+// Confirmed in Visual 2C02, rendering enabled is latched from bck_enable and spr_enable,
+// which are themselves registers. Therefor, there is one extra cycle of delay.
 reg rendering_enabled;
-always @(posedge clk) if (reset) begin
-	rendering_enabled <= 0;
-end else if (ce) begin
-	rendering_enabled <= (spr_enable | bkg_enable);
-end
 
 // 2C02 has an "is_vblank" flag that is true from pixel 0 of line 241 to pixel 0 of line 0;
 wire is_rendering = rendering_enabled && (scanline < 240 || is_pre_render_line);
@@ -635,6 +619,7 @@ ClockGen clock(
 	.is_rendering        (rendering_enabled),
 	.scanline            (scanline),
 	.cycle               (cycle),
+	.is_in_vblank        (is_in_vblank),
 	.end_of_line         (end_of_line),
 	.at_last_cycle_group (at_last_cycle_group),
 	.exiting_vblank      (exiting_vblank),
@@ -650,8 +635,6 @@ wire [2:0] fine_x_scroll;
 LoopyGen loopy0(
 	.clk           (clk),
 	.ce            (ce),
-	.reset         (reset),
-	.not_ready     (not_ready),
 	.is_rendering  (is_rendering),
 	.ain           (ain),
 	.din           (din),
@@ -683,7 +666,8 @@ BgPainter bg_painter(
 );
 
 // Blank out BG in the leftmost 8 pixels?
-wire [3:0] bg_pixel = {bg_pixel_noblank[3:2], show_bck_on_pixel ? bg_pixel_noblank[1:0] : 2'b00};
+wire show_bg_on_pixel = (playfield_clip || (cycle[7:3] != 0)) && enable_playfield;
+wire [3:0] bg_pixel = {bg_pixel_noblank[3:2], show_bg_on_pixel ? bg_pixel_noblank[1:0] : 2'b00};
 
 // This will set oam_ptr to 0 right before the scanline 240 and keep it there throughout vblank.
 // this is triggered on the first tick after vblank is ended
@@ -704,7 +688,8 @@ SpriteRAM sprite_ram(
 	.clk             (clk),
 	.ce              (ce),
 	.reset_line      (before_line),         // Condition for resetting the sprite line state.
-	.sprites_enabled (is_rendering && !is_pre_render_line),        // Condition for enabling sprite ram logic. Check so we're not on
+	.sprites_enabled (is_rendering),        // Condition for enabling sprite ram logic. Check so we're not on
+	.exiting_vblank  (exiting_vblank),
 	.obj_size        (obj_size),
 	.scanline        (scanline),
 	.cycle           (cycle),
@@ -751,31 +736,23 @@ SpriteSet sprite_gen(
 );
 
 // Blank out obj in the leftmost 8 pixels?
-wire show_spr_on_pixel = (spr_clip || (cycle >= 8)) && spr_enable;
-wire show_bck_on_pixel = (bkg_clip || (cycle >= 8)) && bkg_enable;
-wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_spr_on_pixel ? obj_pixel_noblank[1:0] : 2'b00};
+wire show_obj_on_pixel = (object_clip || (cycle[7:3] != 0)) && enable_objects;
+wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_obj_on_pixel ? obj_pixel_noblank[1:0] : 2'b00};
 
-// Sprite 0 flag timing:
-//  - s0_on_next_scanline is initialized at dot = 66.5-67 (during sprite
-//    evaluation for sprite 0)
-//  - It is copied over to s0_on_cur_scanline during dots
-//    257.5-258, 258.5-259, ..., 319.5-320
-
-// https://wiki.nesdev.com/w/index.php/PPU_OAM#Sprite_zero_hits
 reg sprite0_hit_bg;            // True if sprite#0 has collided with the BG in the last frame.
 always @(posedge clk) if (ce) begin
+	rendering_enabled <= (enable_objects | enable_playfield);
 	if (cycle == 340 && scanline == 260) // confirmed with visual 2C02 (261, 1);
 		sprite0_hit_bg <= 0;
 	else if (
-		is_rendering                        &&    // Object rendering is enabled
-		!is_pre_render_line                 &&    // Y Pixel 0..239
-		(cycle < 256)                       &&    // X Pixel 0..255
-		cycle[7:0] != 255                   &&    // X pixel != 255
-		obj0_on_line                        &&    // True if sprite#0 is included on the scan line.
-		is_obj0_pixel                       &&    // True if the pixel came from tempram #0.
-		show_spr_on_pixel                   &&
-		show_bck_on_pixel                   &&
-		bg_pixel[1:0] != 0) begin                 // Background pixel nonzero.
+		is_rendering        &&    // Object rendering is enabled
+		!cycle[8]           &&    // X Pixel 0..255
+		cycle[7:0] != 255   &&    // X pixel != 255
+		!is_pre_render_line &&    // Y Pixel 0..239
+		obj0_on_line        &&    // True if sprite#0 is included on the scan line.
+		is_obj0_pixel       &&    // True if the pixel came from tempram #0.
+		show_obj_on_pixel   &&
+		bg_pixel[1:0] != 0) begin // Background pixel nonzero.
 
 			sprite0_hit_bg <= 1;
 	end
@@ -824,98 +801,55 @@ PaletteRam palette_ram(
 
 assign color = grayscale ? {color2[5:4], 4'b0} : color2;
 
-reg bkg_enable, spr_enable;
+reg enable_playfield, enable_objects;
 
-// The data being written should be visble to the PPU before the CE takes place.
-// In Visual 2C02, the data is available 3 master clocks prior to the cpos being
-// incremented, correctly corresponding to when M2 is asserted.
-
-always @(posedge clk) begin
+always @(posedge clk)
+if (ce) begin
 	if (reset) begin
-		{obj_patt, bg_patt, obj_size, nmi_enable} <= 0; // 2000 resets to 0
-		{grayscale, bkg_clip, spr_clip, bkg_enable, spr_enable, emphasis} <= 0; // 2001 resets to 0
-	end else if (write && ~not_ready) begin
+		{obj_patt, bg_patt, obj_size, vbl_enable} <= 0; // 2000 resets to 0
+		{grayscale, playfield_clip, object_clip, enable_playfield, enable_objects, emphasis} <= 0; // 2001 resets to 0
+	end else if (write) begin
 		case (ain)
 			0: begin // PPU Control Register 1
 				// t:....BA.. ........ = d:......BA
 				obj_patt <= din[3];
 				bg_patt <= din[4];
 				obj_size <= din[5];
-				nmi_enable <= din[7];
+				vbl_enable <= din[7];
 			end
 
 			1: begin // PPU Control Register 2
 				grayscale <= din[0];
-				bkg_clip <= din[1];
-				spr_clip <= din[2];
-				bkg_enable <= din[3];
-				spr_enable <= din[4];
+				playfield_clip <= din[1];
+				object_clip <= din[2];
+				enable_playfield <= din[3];
+				enable_objects <= din[4];
 				emphasis <= din[7:5];
 			end
 		endcase
 	end
+	// https://wiki.nesdev.com/w/index.php/NMI
+	// Reset frame specific counters upon exiting vblank
+	if (exiting_vblank)
+		nmi_occured <= 0;
+	// Set the
+	if (entering_vblank)
+		nmi_occured <= 1;
+	// Reset NMI register when reading from Status
+	if (read && ain == 2)
+		nmi_occured <= 0;
 end
 
-// Mesen
-// 226/121
-// 0/261
-// 242/121
-// 4/261
-// NMI: 1
-// NMI: 2, 5, 8, 11
-
-// Mister
-// 228/121
-// 340/260
-// 242/121
-// 7/261
-// NMI: ends 1/261 0/261
-// SPR on: 84/121 (seen 85)
-
-// https://wiki.nesdev.com/w/index.php/NMI
-// vbl_flag has a read buffer for 2002 reads. The moment M2 goes high and the address is 2002
-// the buffer will lock, otherwise it will continuously mirror the state of vbl_flag. When
-// vblank ends, a different flag will clear the value, not locking the buffer. NMI is a
-// continuous value which simply reflects the state of (vbl_flag & nmi_enable).
-
-wire read_2002_output_vblank_flag = (read & ain == 2);
-
-wire vbl_latch;
-always @(posedge clk) begin
-	if (ce) begin
-		if (ppu_cycle == 82182)
-			vbl_flag <= 1;
-
-		if (ppu_cycle == 89002)
-			vbl_flag <= 0;
-	end
-
-	if (read_2002_output_vblank_flag)
-		vbl_flag <= 0;
-	else
-		vbl_latch <= vbl_flag;
-end
-
-assign nmi = vbl_flag && nmi_enable;
-
-(* syn_preserve = 1 *) int ppu_cycle;
-always @(posedge clk) if (reset) begin
-	ppu_cycle <= 0;
-end else if (ce) begin
-	ppu_cycle <= ppu_cycle + 1'b1;
-	if (ppu_cycle == 'd89341 || (short_frame && ppu_cycle == 'd89340))
-		ppu_cycle <= 0;
-end
+// If we're triggering a VBLANK NMI
+assign nmi = nmi_occured && vbl_enable;
 
 // One cycle after vram_r was asserted, the value
 // is available on the bus.
-always @(posedge clk) begin :vram
-	reg vram_read_delayed;
-	if (ce) begin
-		if (vram_read_delayed)
-			vram_latch <= vram_din;
-		vram_read_delayed <= vram_r_ppudata;
-	end
+reg vram_read_delayed;
+always @(posedge clk) if (ce) begin
+	if (vram_read_delayed)
+		vram_latch <= vram_din;
+	vram_read_delayed <= vram_r_ppudata;
 end
 
 // Value currently being written to video ram
@@ -928,11 +862,8 @@ reg [23:0] decay_high;
 reg [23:0] decay_low;
 
 reg refresh_high, refresh_low;
-reg latched_vblank;
 
-always @(posedge clk) begin :ppu_read
-	reg old_read;
-
+always @(posedge clk) begin
 	if (refresh_high) begin
 		decay_high = 3221590; // aprox 600ms decay rate
 		refresh_high <= 0;
@@ -953,30 +884,24 @@ always @(posedge clk) begin :ppu_read
 			decay_low <= decay_low - 1'b1;
 		else
 			latched_dout[4:0] <= 5'b00000;
-	end
 
-	if (~old_read & read)
-		latched_vblank <= vbl_flag;
+		if (read) begin
+			case (ain)
+				2: begin
+					latched_dout <= {nmi_occured,
+									sprite0_hit_bg,
+									sprite_overflow,
+									latched_dout[4:0]};
+					refresh_high <= 1'b1;
+				end
 
-	old_read <= read;
-	if (read) begin
-		case (ain)
-			2: begin
-				latched_dout <= {vbl_latch,
-					sprite0_hit_bg,
-					sprite_overflow,
-					latched_dout[4:0]};
-				refresh_high <= 1'b1;
-			end
+				4: begin
+					latched_dout <= oam_bus;
+					refresh_high <= 1'b1;
+					refresh_low <= 1'b1;
+				end
 
-			4: begin
-				latched_dout <= oam_bus;
-				refresh_high <= 1'b1;
-				refresh_low <= 1'b1;
-			end
-
-			7: if (ce) begin
-				if (is_pal_address) begin
+				7: if (is_pal_address) begin
 						latched_dout <= {latched_dout[7:6], color};
 						refresh_low <= 1'b1;
 					end else begin
@@ -984,17 +909,17 @@ always @(posedge clk) begin :ppu_read
 						refresh_high <= 1'b1;
 						refresh_low <= 1'b1;
 					end
-				end
-			default: latched_dout <= latched_dout;
-		endcase
+				default: latched_dout <= latched_dout;
+			endcase
 
-		if (reset)
-			latched_dout <= 8'd0;
+			if (reset)
+				latched_dout <= 8'd0;
 
-	end else if (write) begin
-		refresh_high <= 1'b1;
-		refresh_low <= 1'b1;
-		latched_dout <= din;
+		end else if (write) begin
+			refresh_high <= 1'b1;
+			refresh_low <= 1'b1;
+			latched_dout <= din;
+		end
 	end
 end
 

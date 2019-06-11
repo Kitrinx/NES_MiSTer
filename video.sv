@@ -13,7 +13,7 @@ module video
 	input        hide_overscan,
 	input  [3:0] palette,
 	input  [2:0] emphasis,
-	input  [1:0] reticule,
+	input  [1:0] reticle,
 
 	output       ce_pix,
 	output   reg hold_reset,
@@ -27,7 +27,7 @@ module video
 );
 
 reg pix_ce, pix_ce_n;
-wire [5:0] color_ef = reticule[0] ? (reticule[1] ? 6'h21 : 6'h15) : is_padding ? 6'd63 : color;
+wire [5:0] color_ef = reticle[0] ? (reticle[1] ? 6'h21 : 6'h15) : is_padding ? 6'd63 : color;
 
 always @(negedge clk) begin
 	reg [1:0] cnt = 0;
@@ -249,7 +249,7 @@ always @(posedge clk) begin
 		hold_reset <= 1'b1;
 
 	if(pix_ce_n) begin
-		if((old_count_v == 261) && (count_v == 0)) begin
+		if((old_count_v == 511) && (count_v == 0)) begin
 			h <= 0;
 			v <= 0;
 			free_sync <= 0;
@@ -294,7 +294,7 @@ end
 localparam HBL_START = 256;
 localparam HBL_END   = 340;
 localparam VBL_START = 240;
-localparam VBL_END   = 261;
+localparam VBL_END   = 511;
 
 wire is_padding = (hc > 255);
 

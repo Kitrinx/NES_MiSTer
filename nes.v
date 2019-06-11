@@ -179,24 +179,6 @@ module NES(
 // PPU ---P---P---P---P---P---P---P---P---P---P---P---P
 //  M: M2 Tick, C: CPU Tick, P: PPU Tick -: Idle Cycle
 
-
-// φ1        1 0 1 0 1 0 1 0
-// φ2        0 1 0 1 0 1 0 1
-// apu_clk1  1 0 0 0 1 0 0 0 (Every Other even CPU CE)
-// apu_/clk2 1 1 0 1 1 1 0 1 (Every other even φ2)
-// apu_clk2x 0 0 1 0 0 0 1 0 (Every other odd CPU CE)
-//
-//                   Tick 0           Tick 1           Tick 2
-// MiSTer CEs      | *                P                P               | *                P
-// Master clock    | 1 0 1 0 1 0 1 0  1 0 1 0 1 0 1 0  1 0 1 0 1 0 1 0 | 1 0 1 0 1 0 1 0  1 0 1 0 1 0 ...
-// PPU pixel clock | 0 0 0 0 1 1 1 1  0 0 0 0 1 1 1 1  0 0 0 0 1 1 1 1 | 0 0 0 0 1 1 1 1  0 0 0 0 1 1 ...
-// CPU clock       | 1 0 0 0 0 0 0 0  0 0 ! ! ! 1 1 1  1 1 1 1 1 1 1 1 | 1 0 0 0 0 0 0 0  0 0 ! ! ! 1 ...
-//                    ^                   ^
-//                    CPU Reads           Latch VBlank
-//                   +IRQ and NMI
-// ! = M2 high, phi2 low
-
-
 assign nes_div = div_sys;
 assign apu_ce = cpu_ce;
 
@@ -405,7 +387,6 @@ assign cycle = use_fake_h ? 9'd340 : ppu_cycle;
 PPU ppu(
 	.clk              (clk),
 	.ce               (ppu_ce),
-	.cpu_ce           (cpu_ce),
 	.reset            (reset),
 	.color            (color),
 	.din              (dbus),
