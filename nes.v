@@ -53,7 +53,7 @@ end else if (ce) begin
 	if (dmc_state == 1 && !odd_cycle) dmc_state <= 0;
 
 	if (sprite_trigger) begin sprite_dma_addr <= {data_from_cpu, 8'h00}; spr_state <= 1; end
-	if (spr_state == 1 && odd_cycle) spr_state <= 3;
+	if (spr_state == 1 && cpu_read && odd_cycle) spr_state <= 3;
 	if (spr_state[1] && !odd_cycle && dmc_state == 1) spr_state <= 1;
 	if (spr_state[1] && odd_cycle) sprite_dma_addr[7:0] <= new_sprite_dma_addr[7:0];
 	if (spr_state[1] && odd_cycle && new_sprite_dma_addr[8]) spr_state <= 0;
@@ -405,6 +405,7 @@ assign cycle = use_fake_h ? 9'd340 : ppu_cycle;
 PPU ppu(
 	.clk              (clk),
 	.ce               (ppu_ce),
+	.cpu_ce           (cpu_ce),
 	.reset            (reset),
 	.color            (color),
 	.din              (dbus),

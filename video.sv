@@ -280,28 +280,27 @@ always @(posedge clk) begin
 
 	if(pix_ce) begin
 		if(hide_overscan) begin
-			HBlank <= (hc >= (HBL_START-10) && (hc <= HBL_END + 9));       // 280 - ((224/240) * 16) = 261.3
-			VBlank <= (vc > (VBL_START-10)) || (vc < 7);                   // 240 - 16 = 224
+			HBlank <= (hc >= HBL_START && hc <= HBL_END);                  // 280 - ((224/240) * 16) = 261.3
+			VBlank <= (vc > (VBL_START - 9)) || (vc < 8);                  // 240 - 16 = 224
 		end else begin
 			HBlank <= (hc >= HBL_START) && (hc <= HBL_END);                // 280 pixels
-			VBlank <= ((vc >= VBL_START) || (vc == (VBL_START - 1'b1) && hc > HBL_END)) && 
-				((vc < VBL_END) || (vc == VBL_END && hc <= HBL_END));      // 240 lines, slightly skewed
+			VBlank <= (vc >= VBL_START);                                   // 240 lines
 		end
 		HSync  <= ((hc >= 278) && (hc < 303));
 		VSync  <= ((vc >= 244) && (vc < 247));
 	end
 end
 
-localparam HBL_START = 268;
-localparam HBL_END   = 328;
+localparam HBL_START = 256;
+localparam HBL_END   = 340;
 localparam VBL_START = 240;
 localparam VBL_END   = 261;
 
 wire is_padding = (hc > 255);
 
 reg dark_r, dark_g, dark_b;
-// bits are in order {B, G, R} color emphasis
-// Only effects range $00-$0D, $10-$1D, $20-$2D, and $30-$3D, however this seems wrong
+// bits are in order {B, G, R} for NTSC color emphasis
+// Only effects range $00-$0D, $10-$1D, $20-$2D, and $30-$3D
 always @(posedge clk) if (pix_ce_n) begin
 	{dark_r, dark_g, dark_b} <= 3'b000;
 

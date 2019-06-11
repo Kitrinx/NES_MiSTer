@@ -111,8 +111,8 @@ assign LED_USER  = downloading | (loader_fail & led_blink) | (bk_state != S_IDLE
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
 
-assign VIDEO_ARX = status[8] ? 8'd16 : 8'd4;
-assign VIDEO_ARY = status[8] ? 8'd9  : 8'd3;
+assign VIDEO_ARX = status[8] ? 8'd16 : (status[4] ? 8'd64 : 8'd128);
+assign VIDEO_ARY = status[8] ? 8'd9  : (status[4] ? 8'd49 : 8'd105);
 
 assign CLK_VIDEO = clk;
 
