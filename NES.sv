@@ -137,8 +137,7 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 parameter CONF_STR = {
 	"NES;;",
 	"-;",
-	"FS,NES;",
-	"FS,FDS;",
+	"FS,NESFDS;",
 	"H1F,BIN,Load FDS BIOS;",
 	"-;",
 	"ONO,System Type,NTSC,PAL,Dendy;",
@@ -963,7 +962,7 @@ mystate state;
 
 wire type_bios = (filetype == 0 || filetype == 3); //*.BIOS or boot.rom or boot0.rom
 //wire type_nes = (filetype == 1 || filetype==8'h40); //*.NES or boot1.rom  //default
-wire type_fds = (filetype == 2 || filetype==8'h80); //*.FDS or boot2.rom
+wire type_fds = (filetype == 8'b01000001 || filetype==8'h80); //*.FDS or boot2.rom
 
 always @(posedge clk) begin
 	if (reset) begin

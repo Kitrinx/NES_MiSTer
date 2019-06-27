@@ -125,7 +125,7 @@ module ClockGen(
 	output is_vbe_sl
 );
 
-reg even_frame_toggle = 0;
+reg even_frame_toggle = 0; // 1 indicates even frame.
 
 // Dendy is 291 to 310
 wire [8:0] vblank_start_sl;
@@ -157,7 +157,8 @@ end
 
 assign at_last_cycle_group = (cycle[8:3] == 42);
 
-// Every second pre-render frame is only 340 cycles instead of 341.
+// For NTSC only, the *last* cycle of odd frames is skipped.
+// In Visual 2C02, the counter starts at zero and flips at scanline 256.
 assign short_frame = end_of_line & skip_pixel;
 
 wire skip_pixel = is_pre_render && ~even_frame_toggle && is_rendering;
@@ -166,7 +167,7 @@ assign end_of_line = at_last_cycle_group && (cycle[3:0] == (skip_pixel ? 3 : 4))
 // Confimed with Visual 2C02
 // All vblank clocked registers should have changed and be readable by cycle 1 of 241/261
 assign entering_vblank = (cycle == 0) && scanline == vblank_start_sl;
-assign exiting_vblank = (cycle == 0) && scanline == 511;
+assign exiting_vblank = (cycle == 0) && is_pre_render;
 
 assign is_vbe_sl = (scanline == vblank_end_sl);
 
@@ -182,6 +183,7 @@ end else if (ce) begin
 	is_in_vblank <= new_is_in_vblank;
 end
 
+
 always @(posedge clk) if (reset) begin
 	scanline <= 0;
 	is_pre_render <= 0;
@@ -192,7 +194,6 @@ end else if (ce && end_of_line) begin
 	// The pre render flag is set while we're on scanline -1.
 	is_pre_render <= (scanline == vblank_end_sl);
 
-	// Visual 2C02 shows the register flipping here
 	if (scanline == 255)
 		even_frame_toggle <= skip_en ? ~even_frame_toggle : 1'b1;
 end
@@ -276,6 +277,283 @@ assign bits =
 assign is_sprite0 = bits0[1:0] != 0;
 
 endmodule  // SpriteSet
+
+
+module OAMEval(
+	input clk,
+	input ce,
+	input reset,
+	input reset_line,          // OAM evaluator needs to be reset before processing is started.
+	input rendering_enabled,   // Set to 1 if evaluations are enabled
+	input obj_size,            // Set to 1 if objects are 16 pixels.
+	input [8:0] scanline,      // Current scan line (compared against Y)
+	input [8:0] cycle,         // Current cycle.
+	input is_pre_render,       // High if on the pre-render scanline
+	output [7:0] oam_bus,      // Current value on the OAM bus, returned to NES through $2004.
+	output reg [31:0] oam_bus_ex,
+	input oam_addr_write,      // Load oam with specified value, when writing to NES $2003.
+	input oam_data_write,      // Load oam_ptr with specified value, when writing to NES $2004.
+	input [7:0] oam_din,       // New value for oam or oam_ptr
+	output reg spr_overflow,   // Set to true if we had more than 8 objects on a scan line. Reset when exiting vblank.
+	output reg sprite0,        // True if sprite#0 is included on the scan line currently being painted.
+	input is_vbe,              // Last line before pre-render
+	input PAL
+);
+
+// https://wiki.nesdev.com/w/index.php/PPU_sprite_evaluation
+// NOTE: At the time of this writing, much information on the wiki is off by one, as mentioned here:
+// https://forums.nesdev.com/viewtopic.php?f=3&t=19005
+
+assign oam_bus = oam_data;
+//assign oam_bus_ex = oam_data_ex;
+
+enum {
+	STATE_IDLE,
+	STATE_CLEAR,
+	STATE_EVAL,
+	STATE_FETCH,
+	STATE_REFRESH
+} oam_state = STATE_IDLE;
+
+reg [7:0] oam_temp[64];    // OAM Temporary buffer, normally 32 bytes, 64 for extra sprites
+reg [7:0] oam[256];        // OAM RAM, 256 bytes
+reg [7:0] oam_addr;        // OAM Address Register 2003
+reg [3:0] oam_temp_slot;   // Pointer to oam_temp;
+reg [7:0] oam_data;        // OAM Data Register 2004
+reg oam_temp_wren;         // Write enable for OAM temp, disabled if full
+//reg sprite_overflow;       // Tried to copy a 9th sprite
+
+// Extra Registers
+reg [5:0] oam_addr_ex;     // OAM pointer for use with extra sprites
+reg [3:0] oam_temp_slot_ex;
+reg [1:0] m_ex;
+reg [7:0] oam_data_ex;
+reg [2:0] spr_counter;     // Count sprites
+
+wire visible = (scanline < 240);
+wire rendering = (scanline == 9'd511 || visible) && rendering_enabled;
+wire evaluating = visible && rendering_enabled;
+
+reg [6:0] oam_temp_addr;
+
+reg sprite0_curr;
+
+//Cycles 1-64: Secondary OAM (32-byte buffer for current sprites on scanline) is initialized to $FF
+// - attempting to read $2004 will return $FF. Internally, the clear operation is implemented by reading from the OAM
+//and writing into the secondary OAM as usual, only a signal is active that makes the read always return $FF.
+
+//Cycles 65-256: Sprite evaluation
+// The first OAM entry to be checked during sprite evaluation is the one starting at OAM[OAMADDR]
+
+//Cycles 257-320: Sprite fetches (8 sprites total, 8 cycles per sprite)
+//Cycles 321-340+0: Background render pipeline initialization
+
+always @(posedge clk) begin :oam_eval
+reg n_ovr;
+reg [1:0] eval_counter;
+reg [6:0] feed_cnt;
+
+
+// This should happen on the third cycle of rendering
+if (cycle == 0 && ce) begin
+	sprite0 <= sprite0_curr;
+	sprite0_curr <= 0;
+end
+
+if (reset) begin
+	oam_temp <= '{64{8'hFF}};
+	oam_data <= oam_temp[0];
+	oam_temp_addr <= 0; // XXX: Confirm loc
+	oam_temp_slot <= 0;
+	oam_temp_wren <= 1;
+	oam_temp_slot_ex <= 0;
+	n_ovr <= 0;
+	spr_counter <= 0;
+	sprite0 <= 0;
+	sprite0_curr <= 0;
+	feed_cnt <= 0;
+	eval_counter <= 0;
+	oam_state <= STATE_IDLE;
+end else if (ce) begin
+
+	// State machine. Remember these will be one ppu cycle early.
+	case (cycle)
+		337: oam_state <= STATE_IDLE;    // 1 cycle
+		338,0: oam_state <= STATE_CLEAR; // 64 cycles
+		62:  oam_state <= STATE_EVAL;    // 192 cycles
+		254: oam_state <= STATE_FETCH;   // 64 cycles
+		318: oam_state <= STATE_REFRESH; // 19 cycles
+	endcase
+
+	// It is also the case that if OAMADDR is not less than eight when rendering starts, 
+	// the eight bytes starting at OAMADDR & 0xF8 are copied to the first eight bytes
+	// of OAM; it seems likely that this is related. On the Dendy, the latter bug is
+	// required for 2C02 compatibility. (Cause by DRAM bug in original)
+	if (rendering && cycle == 0) begin
+		if (|oam_addr[7:3] && ~PAL) begin
+			oam[0] <= oam[{oam_addr[7:3], 3'b000}];
+			oam[1] <= oam[{oam_addr[7:3], 3'b001}];
+			oam[2] <= oam[{oam_addr[7:3], 3'b010}];
+			oam[3] <= oam[{oam_addr[7:3], 3'b011}];
+			oam[4] <= oam[{oam_addr[7:3], 3'b100}];
+			oam[5] <= oam[{oam_addr[7:3], 3'b101}];
+			oam[6] <= oam[{oam_addr[7:3], 3'b110}];
+			oam[7] <= oam[{oam_addr[7:3], 3'b111}];
+		end
+	end
+
+	if (evaluating || (visible && PAL)) begin
+		if (oam_state == STATE_IDLE) begin
+			oam_data <= oam_temp[0];
+			oam_temp_addr <= 0; // XXX: Confirm loc
+			oam_temp_slot <= 0;
+			oam_temp_wren <= 1;
+			oam_temp_slot_ex <= 0;
+			oam_addr_ex <= 0;
+			n_ovr <= 0;
+			spr_counter <= 0;
+			feed_cnt <= 0;
+			eval_counter <= 0;
+		end else if (oam_state == STATE_CLEAR) begin               // Initialization state
+			if (cycle[0]) begin
+				oam_data <= 8'hFF;
+			end else if (~cycle[0]) begin
+				oam_temp[oam_temp_addr] <= oam_data;
+				// Clear extra sprite space too
+				oam_temp[oam_temp_addr + 8'd32] <= oam_data;
+				oam_temp_addr <= oam_temp_addr + 1'b1;
+			end
+
+			// During init, we hunt for the 8th sprite in OAM, so we know where to start for extra sprites
+			if (~&spr_counter) begin
+				oam_addr_ex <= oam_addr_ex + 1'd1;
+				if (scanline >= oam[{oam_addr_ex, 2'b00}] && scanline < oam[{oam_addr_ex, 2'b00}] + (obj_size ? 16 : 8))
+					spr_counter <= spr_counter + 1'b1;
+			end
+
+		end else if (oam_state == STATE_EVAL) begin             // Evaluation State
+			// This phase has exactly enough cycles to evaluate all 64 sprites if 8 are on the current line,
+			// so extra sprite evaluation has to be done seperately.
+			if (spr_counter == 7 && oam_addr_ex <= 62) begin //XXX: Fix
+				oam_addr_ex <= oam_addr_ex + 1'b1;
+				if (scanline >= oam[{oam_addr_ex, 2'b00}] &&
+					scanline < oam[{oam_addr_ex, 2'b00}] + (obj_size ? 16 : 8)) begin
+					if (oam_temp_slot_ex < 8) begin // Turbo style.
+						oam_temp_slot_ex <= oam_temp_slot_ex + 1'b1;
+						oam_temp[{oam_temp_slot_ex, 2'b00} + 6'd32] <= oam[{oam_addr_ex, 2'b00}];
+						oam_temp[{oam_temp_slot_ex, 2'b01} + 6'd32] <= oam[{oam_addr_ex, 2'b01}];
+						oam_temp[{oam_temp_slot_ex, 2'b10} + 6'd32] <= oam[{oam_addr_ex, 2'b10}];
+						oam_temp[{oam_temp_slot_ex, 2'b11} + 6'd32] <= oam[{oam_addr_ex, 2'b11}];
+					end
+				end
+			end
+
+			//On odd cycles, data is read from (primary) OAM
+			if (cycle[0]) begin
+				oam_data <= oam[oam_addr];
+			end else begin
+				oam_addr <= oam_addr + 1'b1;
+				if (~n_ovr) begin
+					if (oam_temp_wren)
+						oam_temp[{oam_temp_slot, oam_addr[1:0]}] <= oam_data;
+					else
+						oam_data <= oam_temp[{oam_temp_slot, oam_addr[1:0]}];
+
+					if (~|eval_counter) begin // m is 0
+						if (scanline >= oam_data && scanline < oam_data + (obj_size ? 16 : 8)) begin
+							if (~oam_temp_wren)
+								spr_overflow <= 1;
+							eval_counter <= eval_counter + 2'd1;
+							if (~|oam_addr[7:2])
+								sprite0_curr <= 1'b1;
+							{n_ovr, oam_addr} <= {1'b0, oam_addr} + 9'd1; // is good, copy
+						end else begin
+							{n_ovr, oam_addr} <= ((~oam_temp_wren && ~spr_overflow) ?
+							({1'b0, {oam_addr[7:2], oam_addr[1:0] + 2'd1}} + 9'd4) : // Sprite overflow bug emulation
+							({1'b0, oam_addr} + 9'd4)); // skip to next sprite
+						end
+					end else begin
+						eval_counter <= eval_counter + 2'd1;
+						{n_ovr, oam_addr} <= {1'b0, oam_addr} + 9'd1;
+
+						if (&eval_counter) begin // end of copy
+							oam_temp_slot <= oam_temp_slot+ 1'b1;
+							if (oam_temp_slot == 7)
+								oam_temp_wren <= 0;
+						end
+					end
+				end
+			end
+		end else if (oam_state == STATE_FETCH) begin
+			feed_cnt <= feed_cnt + 1'd1;
+			case (feed_cnt[2:0])
+				0: begin // Y Coord
+					oam_data <= oam_temp[{feed_cnt[6:3], 2'b00}];
+					oam_bus_ex <= {
+						oam_temp[{(feed_cnt[6:3] + 4'd8), 2'b11}],
+						oam_temp[{(feed_cnt[6:3] + 4'd8), 2'b10}],
+						oam_temp[{(feed_cnt[6:3] + 4'd8), 2'b01}],
+						oam_temp[{(feed_cnt[6:3] + 4'd8), 2'b00}]
+					};
+
+				end
+
+				1: begin // Tile Num
+					oam_data <= oam_temp[{feed_cnt[6:3], 2'b01}];
+				end
+
+				2: begin // Attr
+					oam_data <= oam_temp[{feed_cnt[6:3], 2'b10}];
+				end
+
+				3,4,5,6,7: begin // X Coord
+					oam_data <= oam_temp[{feed_cnt[6:3], 2'b11}];
+				end
+			endcase
+		end else begin // STATE_REFRESH
+			oam_data <= oam_temp[0];
+		end
+	end else begin
+		//if (~&scanline)
+			oam_data <= oam[oam_addr]; // Keep it available in case it's read
+	end
+
+	// OAMADDR is set to 0 during each of ticks 257-320 (the sprite tile loading interval) of the pre-render 
+	// and visible scanlines.
+	if (oam_state == STATE_FETCH && rendering)
+		oam_addr <= 0;
+
+	if (is_vbe && cycle == 339)
+		spr_overflow <= 0;
+
+	// Writes to OAMDATA during rendering (on the pre-render line and the visible lines 0-239,
+	// provided either sprite or background rendering is enabled) do not modify values in OAM,
+	// but do perform a glitchy increment of OAMADDR, bumping only the high 6 bits (i.e., it bumps
+	// the [n] value in PPU sprite evaluation - it's plausible that it could bump the low bits instead
+	// depending on the current status of sprite evaluation). This extends to DMA transfers via OAMDMA,
+	// since that uses writes to $2004. For emulation purposes, it is probably best to completely ignore
+	// writes during rendering.
+	if (oam_data_write) begin
+		if (~rendering) begin
+			oam[oam_addr] <= (oam_addr[1:0] == 2'b10) ? (oam_din & 8'hE3) : oam_din; // byte 3 has no bits 2-4
+			oam_data <= (oam_addr[1:0] == 2'b10) ? (oam_din & 8'hE3) : oam_din;
+			oam_addr <= oam_addr + 1'b1;
+		end else begin
+			oam_addr <= oam_addr + 3'd4;
+		end
+	end
+
+	if (oam_addr_write) begin
+		oam_addr <= oam_din;
+	end
+
+end
+end // End Always
+
+endmodule
+
+
+
 
 module SpriteRAM(
 	input clk,
@@ -372,7 +650,6 @@ always @(posedge clk) if (ce) begin
 	sprite0_curr <= (state == 2'b01 && oam_ptr[7:2] == 0 && spr_is_inside || sprite0_curr);
 
 	// Always writing to temp ram while we're in state 0 or 1.
-	// Only write during rendering and sprite evaluation cycles (0-255)
 	if (sprites_enabled && ~cycle[8] && !state[1]) sprtemp[sprtemp_ptr] <= oam_bus;
 
 	// Update state machine on every second cycle.
@@ -415,6 +692,7 @@ module SpriteAddressGen(
 	input enabled,          // If unset, |load| will be all zeros.
 	input obj_size,         // 0: Sprite Height 8, 1: Sprite Height 16.
 	input obj_patt,         // Object pattern table selection
+	input [7:0] scanline,
 	input [2:0] cycle,      // Current load cycle. At #4, first bitmap byte is loaded. At #6, second bitmap byte is.
 	input [7:0] temp,       // Input temp data from SpriteTemp. #0 = Y Coord, #1 = Tile, #2 = Attribs, #3 = X Coord
 	output [12:0] vram_addr,// Low bits of address in VRAM that we'd like to read.
@@ -452,13 +730,68 @@ assign load_in = {vram_f, vram_f, temp, temp[1:0], temp[5]};
 // selected pattern.
 assign vram_addr = {obj_size ? temp_tile[0] : obj_patt,
 										temp_tile[7:1], obj_size ? y_f[3] : temp_tile[0], cycle[1], y_f[2:0] };
+wire [7:0] scanline_y = scanline - temp;
 always @(posedge clk) if (ce) begin
-	if (load_y) temp_y <= temp[3:0];
+	if (load_y) temp_y <= scanline_y[3:0];
 	if (load_tile) temp_tile <= temp;
 	if (load_attr) {flip_y, flip_x, dummy_sprite} <= {temp[7:6], temp[4]};
 end
 
 endmodule  // SpriteAddressGen
+
+
+// module SpriteAddressGenEx(
+// 	input clk,
+// 	input ce,
+// 	input enabled,          // If unset, |load| will be all zeros.
+// 	input obj_size,         // 0: Sprite Height 8, 1: Sprite Height 16.
+// 	input obj_patt,         // Object pattern table selection
+// 	input [7:0] scanline,
+// 	input [2:0] cycle,      // Current load cycle. At #4, first bitmap byte is loaded. At #6, second bitmap byte is.
+// 	input [31:0] temp,      // Input temp data from SpriteTemp. #0 = Y Coord, #1 = Tile, #2 = Attribs, #3 = X Coord
+// 	input [7:0] vram_data,  // Byte of VRAM in the specified address
+// 	output [12:0] vram_addr,// Low bits of address in VRAM that we'd like to read.
+// 	output [3:0] load,      // Which subset of load_in that is now valid, will be loaded into SpritesGen.
+// 	output [26:0] load_in   // Bits to load into SpritesGen.
+// );
+
+// reg [7:0] temp_tile;    // Holds the tile that we will get
+// reg [3:0] temp_y;       // Holds the Y coord (will be swapped based on FlipY).
+// reg flip_x, flip_y;     // If incoming bitmap data needs to be flipped in the X or Y direction.
+// wire load_y =    (cycle == 0);
+// wire load_tile = (cycle == 1);
+// wire load_attr = (cycle == 2) && enabled;
+// wire load_x =    (cycle == 3) && enabled;
+// wire load_pix1 = (cycle == 5) && enabled;
+// wire load_pix2 = (cycle == 7) && enabled;
+// reg dummy_sprite; // Set if attrib indicates the sprite is invalid.
+
+// // Flip incoming vram data based on flipx. Zero out the sprite if it's invalid. The bits are already flipped once.
+// wire [7:0] vram_f =
+// 	dummy_sprite ? 8'd0 :
+// 	!flip_x ? {vram_data[0], vram_data[1], vram_data[2], vram_data[3], vram_data[4], vram_data[5], vram_data[6], vram_data[7]} :
+// 	vram_data;
+
+// wire [3:0] y_f = temp_y ^ {flip_y, flip_y, flip_y, flip_y};
+// assign load = {load_pix1, load_pix2, load_x, load_attr};
+// assign load_in = {vram_f, vram_f, temp, temp[1:0], temp[5]};
+
+// // If $2000.5 = 0, the tile index data is used as usual, and $2000.3
+// // selects the pattern table to use. If $2000.5 = 1, the MSB of the range
+// // result value become the LSB of the indexed tile, and the LSB of the tile
+// // index value determines pattern table selection. The lower 3 bits of the
+// // range result value are always used as the fine vertical offset into the
+// // selected pattern.
+// assign vram_addr = {obj_size ? temp_tile[0] : obj_patt,
+// 										temp_tile[7:1], obj_size ? y_f[3] : temp_tile[0], cycle[1], y_f[2:0] };
+// wire [7:0] scanline_y = scanline - temp;
+// always @(posedge clk) if (ce) begin
+// 	if (load_y) temp_y <= scanline_y[3:0];
+// 	if (load_tile) temp_tile <= temp;
+// 	if (load_attr) {flip_y, flip_x, dummy_sprite} <= {temp[7:6], temp[4]};
+// end
+
+// endmodule  // SpriteAddressGen
 
 module BgPainter(
 	input clk,
@@ -718,6 +1051,25 @@ always_comb begin
 			before_line = 1'b1;
 end
 
+
+OAMEval spriteeval (
+	.clk (clk),
+	.ce (ce),
+	.reset(reset),
+	.rendering_enabled(enable_objects | enable_playfield),
+	.obj_size(obj_size),
+	.scanline(scanline),
+	.cycle(cycle),
+	.oam_bus(oam_bus),
+	.oam_addr_write(write && (ain == 3)),
+	.oam_data_write(write && (ain == 4)),
+	.oam_din(din),
+	.spr_overflow(sprite_overflow),
+	.sprite0(obj0_on_line),
+	.is_vbe(is_vbe_sl),
+	.PAL(sys_type[0])
+);
+
 wire [7:0] oam_bus;
 wire sprite_overflow;
 wire obj0_on_line; // True if sprite#0 is included on the current line
@@ -731,12 +1083,12 @@ SpriteRAM sprite_ram(
 	.obj_size        (obj_size),
 	.scanline        (scanline),
 	.cycle           (cycle),
-	.oam_bus         (oam_bus),
+	.oam_bus         (/*oam_bus*/),
 	.oam_ptr_load    (write && (ain == 3)), // Write to oam_ptr
 	.oam_load        (write && (ain == 4)), // Write to oam[oam_ptr]
 	.data_in         (din),
-	.spr_overflow    (sprite_overflow),
-	.sprite0         (obj0_on_line),
+	.spr_overflow    (/*sprite_overflow*/),
+	.sprite0         (/*obj0_on_line*/),
 	.is_vbe          (is_vbe_sl)
 );
 
@@ -753,6 +1105,7 @@ SpriteAddressGen address_gen(
 	.ce        (ce),
 	.enabled   (cycle[8] && !cycle[6]),  // Load sprites between 256..319
 	.obj_size  (obj_size),
+	.scanline  (scanline[7:0]),
 	.obj_patt  (obj_patt),               // Object size and pattern table
 	.cycle     (cycle[2:0]),             // Cycle counter
 	.temp      (oam_bus),                // Info from temp buffer.

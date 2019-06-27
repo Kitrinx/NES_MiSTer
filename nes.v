@@ -164,7 +164,6 @@ wire [7:0] cpu_dout;
 // master cycles and low for 6 master cycles. It is considered active when low or "even".
 reg odd_or_even = 0; // 1 == odd, 0 == even
 
-// XXX: Because we are using div4 clock divider for PAL, master clock should be 21.2813696
 // Clock Dividers
 wire [4:0] div_cpu_n = 5'd12;
 wire [2:0] div_ppu_n = 3'd4; 
@@ -327,7 +326,7 @@ wire [15:0] sample_apu;
 APU apu(
 	.MMC5           (1'b0),
 	.clk            (clk),
-	.PAL            (sys_type[1]),
+	.PAL            (sys_type[0]),
 	.ce             (cpu_ce),
 	.reset          (reset),
 	.ADDR           (addr[4:0]),
