@@ -87,6 +87,7 @@ module NES(
 	output  [1:0] diskside_req,
 	input   [1:0] diskside,
 	input   [4:0] audio_channels, // Enabled audio channels
+	input         debug,
 
 	// Access signals for the SDRAM.
 	output [21:0] cpumem_addr,
@@ -381,13 +382,20 @@ wire mr_ppu     = mr_int && ppu_io; // Read *from* the PPU.
 wire mw_ppu     = mw_int && ppu_io; // Write *to* the PPU.
 wire ppu_cs = addr >= 'h2000 && addr < 'h4000;
 wire [7:0] ppu_dout;            // Data from PPU to CPU
-wire chr_read, chr_write;       // If PPU reads/writes from VRAM
-wire [13:0] chr_addr;           // Address PPU accesses in VRAM
+wire chr_read, chr_write, chr_read_ex;       // If PPU reads/writes from VRAM
+wire [13:0] chr_addr, chr_addr_ex;           // Address PPU accesses in VRAM
 wire [7:0] chr_from_ppu;        // Data from PPU to VRAM
 wire [7:0] chr_to_ppu;
 wire [19:0] mapper_ppu_flags;   // PPU flags for mapper cheating
 wire [8:0] ppu_cycle;
 assign cycle = use_fake_h ? 9'd340 : ppu_cycle;
+
+// if (chr_aout[21:20] == 2'b10)
+// 	chr_aout[19:0] = {chr_aout[19:13] & chr_mask, chr_aout[12:0]};
+
+// Remap the CHR address into VRAM, if needed.
+//chr_aout = vram_ce ? {11'b11_0000_0000_0, vram_a10, chr_ain[9:0]} : chr_aout;
+
 
 PPU ppu(
 	.clk              (clk),
@@ -404,15 +412,18 @@ PPU ppu(
 	.pre_read         (ppu_fetch & mr_int & ppu_cs),
 	.pre_write        (ppu_fetch & mw_int & ppu_cs),
 	.vram_r           (chr_read),
+	.vram_r_ex        (chr_read_ex),
 	.vram_w           (chr_write),
 	.vram_a           (chr_addr),
+	.vram_a_ex        (chr_addr_ex),
 	.vram_din         (chr_to_ppu),
 	.vram_dout        (chr_from_ppu),
 	.scanline         (scanline),
 	.cycle            (ppu_cycle),
 	.mapper_ppu_flags (mapper_ppu_flags),
 	.emphasis         (emphasis),
-	.short_frame      (skip_pixel)
+	.short_frame      (skip_pixel),
+	.debug            (debug)
 );
 
 
@@ -446,7 +457,9 @@ cart_top multi_mapper (
 	.prg_write         (prg_write),               // CPU RnW split
 	.prg_din           (prg_din),                 // CPU Data bus in (split from bid)
 	.prg_dout          (prg_dout_mapper),         // CPU Data bus out (split from bid)
-	.chr_ain           (chr_addr),                // PPU address in
+	.chr_ex            (chr_read_ex),             // Flag indicating to use extra sprite addr
+	.chr_ain_orig      (chr_addr),                // PPU address in
+	.chr_ain_ex        (chr_addr_ex),             // PPU address for extra sprites
 	.chr_read          (chr_read),                // PPU read (inverted, active high)
 	.chr_write         (chr_write),               // PPU write (inverted, active high)
 	.chr_din           (chr_from_ppu),            // PPU data bus in (split from bid)

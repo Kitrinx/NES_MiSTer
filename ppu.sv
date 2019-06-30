@@ -237,47 +237,74 @@ assign load_out = {pix1, pix2, x_coord, upper_color, aprio};
 
 endmodule  // SpriteGen
 
-// This contains all 8 sprites. Will return the pixel value of the highest prioritized sprite.
-// When load is set, and clocked, load_in is loaded into sprite 7 and all others are shifted down.
+// This contains all sprites. Will return the pixel value of the highest prioritized sprite.
+// When load is set, and clocked, load_in is loaded into sprite 15 and all others are shifted down.
 // Sprite 0 has highest prio.
-// 226 LUTs, 68 Slices
 module SpriteSet(
 	input clk,
-	input ce,              // Input clock
-	input enable,          // Enable pixel generation
-	input [3:0] load,      // Which parts of the state to load/shift.
-	input [26:0] load_in,  // State to load with
-	output [4:0] bits,     // Output bits
-	output is_sprite0      // Set to true if sprite #0 was output
+	input ce,               // Input clock
+	input enable,           // Enable pixel generation
+	input [3:0] load,       // Which parts of the state to load/shift.
+	input [3:0] load_ex,    // Which parts of the state to load/shift for extra sprites.
+	input [26:0] load_in,   // State to load with
+	input [26:0] load_in_ex,// Extra spirtes
+	output [4:0] bits,      // Output bits
+	output is_sprite0,       // Set to true if sprite #0 was output
+	input debug
 );
 
-wire [26:0] load_out7, load_out6, load_out5, load_out4, load_out3, load_out2, load_out1, load_out0;
-wire [4:0] bits7, bits6, bits5, bits4, bits3, bits2, bits1, bits0;
+wire [26:0] load_out7, load_out6, load_out5, load_out4, load_out3, load_out2, load_out1, load_out0,
+	load_out15, load_out14, load_out13, load_out12, load_out11, load_out10, load_out9, load_out8;
+wire [4:0] bits7, bits6, bits5, bits4, bits3, bits2, bits1, bits0,
+	bits15, bits14, bits13, bits12, bits11, bits10, bits9, bits8;
 
-Sprite sprite7(clk, ce, enable, load, load_in,   load_out7, bits7);
-Sprite sprite6(clk, ce, enable, load, load_out7, load_out6, bits6);
-Sprite sprite5(clk, ce, enable, load, load_out6, load_out5, bits5);
-Sprite sprite4(clk, ce, enable, load, load_out5, load_out4, bits4);
-Sprite sprite3(clk, ce, enable, load, load_out4, load_out3, bits3);
-Sprite sprite2(clk, ce, enable, load, load_out3, load_out2, bits2);
-Sprite sprite1(clk, ce, enable, load, load_out2, load_out1, bits1);
-Sprite sprite0(clk, ce, enable, load, load_out1, load_out0, bits0);
+// Extra sprites
+Sprite sprite15(clk, ce, enable, load_ex, load_in_ex, load_out15, bits15);
+Sprite sprite14(clk, ce, enable, load_ex, load_out15, load_out14, bits14);
+Sprite sprite13(clk, ce, enable, load_ex, load_out14, load_out13, bits13);
+Sprite sprite12(clk, ce, enable, load_ex, load_out13, load_out12, bits12);
+Sprite sprite11(clk, ce, enable, load_ex, load_out12, load_out11, bits11);
+Sprite sprite10(clk, ce, enable, load_ex, load_out11, load_out10, bits10);
+Sprite sprite9( clk, ce, enable, load_ex, load_out10, load_out9,  bits9);
+Sprite sprite8( clk, ce, enable, load_ex, load_out9,  load_out8,  bits8);
+
+// Basic Sprites
+Sprite sprite7( clk, ce, enable, load, load_in,    load_out7,  bits7);
+Sprite sprite6( clk, ce, enable, load, load_out7,  load_out6,  bits6);
+Sprite sprite5( clk, ce, enable, load, load_out6,  load_out5,  bits5);
+Sprite sprite4( clk, ce, enable, load, load_out5,  load_out4,  bits4);
+Sprite sprite3( clk, ce, enable, load, load_out4,  load_out3,  bits3);
+Sprite sprite2( clk, ce, enable, load, load_out3,  load_out2,  bits2);
+Sprite sprite1( clk, ce, enable, load, load_out2,  load_out1,  bits1);
+Sprite sprite0( clk, ce, enable, load, load_out1,  load_out0,  bits0);
 
 // Determine which sprite is visible on this pixel.
-assign bits =
-	bits0[1:0] != 0 ? bits0 :
-	bits1[1:0] != 0 ? bits1 :
-	bits2[1:0] != 0 ? bits2 :
-	bits3[1:0] != 0 ? bits3 :
-	bits4[1:0] != 0 ? bits4 :
-	bits5[1:0] != 0 ? bits5 :
-	bits6[1:0] != 0 ? bits6 :
-	bits7;
+assign bits = bits_orig;
+wire [4:0] bits_orig =
+	bits0[1:0]  != 0 ? bits0 :
+	bits1[1:0]  != 0 ? bits1 :
+	bits2[1:0]  != 0 ? bits2 :
+	bits3[1:0]  != 0 ? bits3 :
+	bits4[1:0]  != 0 ? bits4 :
+	bits5[1:0]  != 0 ? bits5 :
+	bits6[1:0]  != 0 ? bits6 :
+	bits7[1:0]  != 0 || ~debug ? bits7 :
+	bits_ex;
+	
+wire [4:0] bits_ex =
+	bits8[1:0]  != 0 ? bits8 :
+	bits9[1:0]  != 0 ? bits9 :
+	bits10[1:0] != 0 ? bits10 :
+	bits11[1:0] != 0 ? bits11 :
+	bits12[1:0] != 0 ? bits12 :
+	bits13[1:0] != 0 ? bits13 :
+	bits14[1:0] != 0 ? bits14 :
+	bits15;
 
+// XXX: this needs adjustment for full impl
 assign is_sprite0 = bits0[1:0] != 0;
 
 endmodule  // SpriteSet
-
 
 module OAMEval(
 	input clk,
@@ -335,6 +362,7 @@ wire rendering = (scanline == 9'd511 || visible) && rendering_enabled;
 wire evaluating = visible && rendering_enabled;
 
 reg [6:0] oam_temp_addr;
+reg [6:0] feed_cnt;
 
 reg sprite0_curr;
 
@@ -349,10 +377,8 @@ reg sprite0_curr;
 //Cycles 321-340+0: Background render pipeline initialization
 
 always @(posedge clk) begin :oam_eval
-reg n_ovr;
+reg n_ovr, ex_ovr;
 reg [1:0] eval_counter;
-reg [6:0] feed_cnt;
-
 
 // This should happen on the third cycle of rendering
 if (cycle == 0 && ce) begin
@@ -373,6 +399,7 @@ if (reset) begin
 	sprite0_curr <= 0;
 	feed_cnt <= 0;
 	eval_counter <= 0;
+	ex_ovr <= 0;
 	oam_state <= STATE_IDLE;
 end else if (ce) begin
 
@@ -411,9 +438,11 @@ end else if (ce) begin
 			oam_temp_slot_ex <= 0;
 			oam_addr_ex <= 0;
 			n_ovr <= 0;
+			ex_ovr <= 0;
 			spr_counter <= 0;
 			feed_cnt <= 0;
 			eval_counter <= 0;
+			oam_bus_ex <= 32'hFFFFFFFF;
 		end else if (oam_state == STATE_CLEAR) begin               // Initialization state
 			if (cycle[0]) begin
 				oam_data <= 8'hFF;
@@ -434,8 +463,8 @@ end else if (ce) begin
 		end else if (oam_state == STATE_EVAL) begin             // Evaluation State
 			// This phase has exactly enough cycles to evaluate all 64 sprites if 8 are on the current line,
 			// so extra sprite evaluation has to be done seperately.
-			if (spr_counter == 7 && oam_addr_ex <= 62) begin //XXX: Fix
-				oam_addr_ex <= oam_addr_ex + 1'b1;
+			if (&spr_counter && ~ex_ovr) begin
+				{ex_ovr, oam_addr_ex} <= oam_addr_ex + 7'd1;
 				if (scanline >= oam[{oam_addr_ex, 2'b00}] &&
 					scanline < oam[{oam_addr_ex, 2'b00}] + (obj_size ? 16 : 8)) begin
 					if (oam_temp_slot_ex < 8) begin // Turbo style.
@@ -495,7 +524,6 @@ end else if (ce) begin
 						oam_temp[{(feed_cnt[6:3] + 4'd8), 2'b01}],
 						oam_temp[{(feed_cnt[6:3] + 4'd8), 2'b00}]
 					};
-
 				end
 
 				1: begin // Tile Num
@@ -525,6 +553,12 @@ end else if (ce) begin
 
 	if (is_vbe && cycle == 339)
 		spr_overflow <= 0;
+
+	// Disabling rendering during OAM evaluation will trigger a glitch causing the current address to be incremented by 1
+	// The increment can be "delayed" by 1 PPU cycle depending on whether or not rendering is disabled on an even/odd cycle
+	// e.g, if rendering is disabled on an even cycle, the following PPU cycle will increment the address by 5 (instead of 4)
+	//      if rendering is disabled on an odd cycle, the increment will wait until the next odd cycle (at which point it will be incremented by 1)
+	// In practice, there is no way to see the difference, so we just increment by 1 at the end of the next cycle after rendering was disabled
 
 	// Writes to OAMDATA during rendering (on the pre-render line and the visible lines 0-239,
 	// provided either sprite or background rendering is enabled) do not modify values in OAM,
@@ -692,7 +726,7 @@ module SpriteAddressGen(
 	input enabled,          // If unset, |load| will be all zeros.
 	input obj_size,         // 0: Sprite Height 8, 1: Sprite Height 16.
 	input obj_patt,         // Object pattern table selection
-	input [7:0] scanline,
+	input [8:0] scanline,
 	input [2:0] cycle,      // Current load cycle. At #4, first bitmap byte is loaded. At #6, second bitmap byte is.
 	input [7:0] temp,       // Input temp data from SpriteTemp. #0 = Y Coord, #1 = Tile, #2 = Attribs, #3 = X Coord
 	output [12:0] vram_addr,// Low bits of address in VRAM that we'd like to read.
@@ -730,7 +764,7 @@ assign load_in = {vram_f, vram_f, temp, temp[1:0], temp[5]};
 // selected pattern.
 assign vram_addr = {obj_size ? temp_tile[0] : obj_patt,
 										temp_tile[7:1], obj_size ? y_f[3] : temp_tile[0], cycle[1], y_f[2:0] };
-wire [7:0] scanline_y = scanline - temp;
+wire [7:0] scanline_y = scanline[7:0] - temp;
 always @(posedge clk) if (ce) begin
 	if (load_y) temp_y <= scanline_y[3:0];
 	if (load_tile) temp_tile <= temp;
@@ -740,58 +774,80 @@ end
 endmodule  // SpriteAddressGen
 
 
-// module SpriteAddressGenEx(
-// 	input clk,
-// 	input ce,
-// 	input enabled,          // If unset, |load| will be all zeros.
-// 	input obj_size,         // 0: Sprite Height 8, 1: Sprite Height 16.
-// 	input obj_patt,         // Object pattern table selection
-// 	input [7:0] scanline,
-// 	input [2:0] cycle,      // Current load cycle. At #4, first bitmap byte is loaded. At #6, second bitmap byte is.
-// 	input [31:0] temp,      // Input temp data from SpriteTemp. #0 = Y Coord, #1 = Tile, #2 = Attribs, #3 = X Coord
-// 	input [7:0] vram_data,  // Byte of VRAM in the specified address
-// 	output [12:0] vram_addr,// Low bits of address in VRAM that we'd like to read.
-// 	output [3:0] load,      // Which subset of load_in that is now valid, will be loaded into SpritesGen.
-// 	output [26:0] load_in   // Bits to load into SpritesGen.
-// );
+// Condensed sprite address generator for extra sprites
+module SpriteAddressGenEx(
+	input clk,
+	input ce,
+	input enabled,          // If unset, |load| will be all zeros.
+	input obj_size,         // 0: Sprite Height 8, 1: Sprite Height 16.
+	input obj_patt,         // Object pattern table selection
+	input [7:0] scanline,
+	input [2:0] cycle,      // Current load cycle. At #4, first bitmap byte is loaded. At #6, second bitmap byte is.
+	input [31:0] temp,      // Input temp data from SpriteTemp. #0 = Y Coord, #1 = Tile, #2 = Attribs, #3 = X Coord
+	input [7:0] vram_data,  // Byte of VRAM in the specified address
+	output [12:0] vram_addr,// Low bits of address in VRAM that we'd like to read.
+	output [3:0] load,      // Which subset of load_in that is now valid, will be loaded into SpritesGen.
+	output [26:0] load_in,  // Bits to load into SpritesGen.
+	output use_ex           // If extra sprite address should be used
+);
 
-// reg [7:0] temp_tile;    // Holds the tile that we will get
-// reg [3:0] temp_y;       // Holds the Y coord (will be swapped based on FlipY).
-// reg flip_x, flip_y;     // If incoming bitmap data needs to be flipped in the X or Y direction.
-// wire load_y =    (cycle == 0);
-// wire load_tile = (cycle == 1);
-// wire load_attr = (cycle == 2) && enabled;
-// wire load_x =    (cycle == 3) && enabled;
-// wire load_pix1 = (cycle == 5) && enabled;
-// wire load_pix2 = (cycle == 7) && enabled;
-// reg dummy_sprite; // Set if attrib indicates the sprite is invalid.
+// We keep an odd structure here to maintain compatibility with the existing sprite modules
+// which are constrained by the behavior of the original system.
 
-// // Flip incoming vram data based on flipx. Zero out the sprite if it's invalid. The bits are already flipped once.
-// wire [7:0] vram_f =
-// 	dummy_sprite ? 8'd0 :
-// 	!flip_x ? {vram_data[0], vram_data[1], vram_data[2], vram_data[3], vram_data[4], vram_data[5], vram_data[6], vram_data[7]} :
-// 	vram_data;
+wire load_y =    (cycle == 0);
+wire load_tile = (cycle == 1);
+wire load_attr = (cycle == 2) && enabled;
+wire load_x =    (cycle == 3) && enabled;
+wire load_pix1 = (cycle == 5) && enabled;
+wire load_pix2 = (cycle == 7) && enabled;
 
-// wire [3:0] y_f = temp_y ^ {flip_y, flip_y, flip_y, flip_y};
-// assign load = {load_pix1, load_pix2, load_x, load_attr};
-// assign load_in = {vram_f, vram_f, temp, temp[1:0], temp[5]};
+reg [7:0] pix1_latch, pix2_latch;
 
-// // If $2000.5 = 0, the tile index data is used as usual, and $2000.3
-// // selects the pattern table to use. If $2000.5 = 1, the MSB of the range
-// // result value become the LSB of the indexed tile, and the LSB of the tile
-// // index value determines pattern table selection. The lower 3 bits of the
-// // range result value are always used as the fine vertical offset into the
-// // selected pattern.
-// assign vram_addr = {obj_size ? temp_tile[0] : obj_patt,
-// 										temp_tile[7:1], obj_size ? y_f[3] : temp_tile[0], cycle[1], y_f[2:0] };
-// wire [7:0] scanline_y = scanline - temp;
-// always @(posedge clk) if (ce) begin
-// 	if (load_y) temp_y <= scanline_y[3:0];
-// 	if (load_tile) temp_tile <= temp;
-// 	if (load_attr) {flip_y, flip_x, dummy_sprite} <= {temp[7:6], temp[4]};
-// end
+wire [7:0] temp_y = scanline[7:0] - temp[7:0];
+wire [7:0] tile   = temp[15:8];
+wire [7:0] attr   = temp[23:16];
+wire [7:0] temp_x = temp[31:24];
 
-// endmodule  // SpriteAddressGen
+wire flip_x = attr[6];
+wire flip_y = attr[7];
+wire dummy_sprite = attr[4];
+
+assign use_ex = ~dummy_sprite && ~cycle[2];
+
+// Flip incoming vram data based on flipx. Zero out the sprite if it's invalid. The bits are already flipped once.
+wire [7:0] vram_f =
+	dummy_sprite ? 8'd0 :
+	!flip_x ? {vram_data[0], vram_data[1], vram_data[2], vram_data[3], vram_data[4], vram_data[5], vram_data[6], vram_data[7]} :
+	vram_data;
+
+wire [3:0] y_f = temp_y[3:0] ^ {flip_y, flip_y, flip_y, flip_y};
+assign load = {load_pix1, load_pix2, load_x, load_attr};
+assign load_in = {pix1_latch, pix2_latch, load_temp, load_temp[1:0], load_temp[5]};
+
+wire [7:0] load_temp;
+always_comb begin
+	case (cycle)
+		0: load_temp = temp_y;
+		1: load_temp = tile;
+		2: load_temp = attr;
+		3,4,5,6,7: load_temp = temp_x;
+	endcase
+end
+
+// If $2000.5 = 0, the tile index data is used as usual, and $2000.3
+// selects the pattern table to use. If $2000.5 = 1, the MSB of the range
+// result value become the LSB of the indexed tile, and the LSB of the tile
+// index value determines pattern table selection. The lower 3 bits of the
+// range result value are always used as the fine vertical offset into the
+// selected pattern.
+assign vram_addr = {obj_size ? tile[0] : obj_patt,
+										tile[7:1], obj_size ? y_f[3] : tile[0], cycle[1], y_f[2:0] };
+always @(posedge clk) if (ce) begin
+	if (load_tile) pix1_latch <= vram_f;
+	if (load_x) pix2_latch <= vram_f;
+end
+
+endmodule  // SpriteAddressGen
 
 module BgPainter(
 	input clk,
@@ -927,15 +983,18 @@ module PPU(
 	input         pre_read,
 	input         pre_write,
 	output        vram_r,           // read from vram active
+	output        vram_r_ex,        // use extra sprite address
 	output        vram_w,           // write to vram active
 	output [13:0] vram_a,           // vram address
+	output [13:0] vram_a_ex,        // vram address for extra sprites
 	input   [7:0] vram_din,         // vram input
 	output  [7:0] vram_dout,
 	output  [8:0] scanline,
 	output  [8:0] cycle,
 	output [19:0] mapper_ppu_flags,
 	output reg [2:0] emphasis,
-	output       short_frame
+	output       short_frame,
+	input         debug
 );
 
 // These are stored in control register 0
@@ -1051,6 +1110,7 @@ always_comb begin
 			before_line = 1'b1;
 end
 
+wire [31:0] oam_bus_ex;
 
 OAMEval spriteeval (
 	.clk (clk),
@@ -1061,6 +1121,7 @@ OAMEval spriteeval (
 	.scanline(scanline),
 	.cycle(cycle),
 	.oam_bus(oam_bus),
+	.oam_bus_ex(oam_bus_ex),
 	.oam_addr_write(write && (ain == 3)),
 	.oam_data_write(write && (ain == 4)),
 	.oam_din(din),
@@ -1074,23 +1135,23 @@ wire [7:0] oam_bus;
 wire sprite_overflow;
 wire obj0_on_line; // True if sprite#0 is included on the current line
 
-SpriteRAM sprite_ram(
-	.clk             (clk),
-	.ce              (ce),
-	.reset_line      (before_line),         // Condition for resetting the sprite line state.
-	.sprites_enabled (is_rendering),        // Condition for enabling sprite ram logic. Check so we're not on
-	.exiting_vblank  (exiting_vblank),
-	.obj_size        (obj_size),
-	.scanline        (scanline),
-	.cycle           (cycle),
-	.oam_bus         (/*oam_bus*/),
-	.oam_ptr_load    (write && (ain == 3)), // Write to oam_ptr
-	.oam_load        (write && (ain == 4)), // Write to oam[oam_ptr]
-	.data_in         (din),
-	.spr_overflow    (/*sprite_overflow*/),
-	.sprite0         (/*obj0_on_line*/),
-	.is_vbe          (is_vbe_sl)
-);
+// SpriteRAM sprite_ram(
+// 	.clk             (clk),
+// 	.ce              (ce),
+// 	.reset_line      (before_line),         // Condition for resetting the sprite line state.
+// 	.sprites_enabled (is_rendering),        // Condition for enabling sprite ram logic. Check so we're not on
+// 	.exiting_vblank  (exiting_vblank),
+// 	.obj_size        (obj_size),
+// 	.scanline        (scanline),
+// 	.cycle           (cycle),
+// 	.oam_bus         (/*oam_bus*/),
+// 	.oam_ptr_load    (write && (ain == 3)), // Write to oam_ptr
+// 	.oam_load        (write && (ain == 4)), // Write to oam[oam_ptr]
+// 	.data_in         (din),
+// 	.spr_overflow    (/*sprite_overflow*/),
+// 	.sprite0         (/*obj0_on_line*/),
+// 	.is_vbe          (is_vbe_sl)
+// );
 
 wire [4:0] obj_pixel_noblank;
 wire [12:0] sprite_vram_addr;
@@ -1105,14 +1166,35 @@ SpriteAddressGen address_gen(
 	.ce        (ce),
 	.enabled   (cycle[8] && !cycle[6]),  // Load sprites between 256..319
 	.obj_size  (obj_size),
-	.scanline  (scanline[7:0]),
+	.scanline  (scanline),
 	.obj_patt  (obj_patt),               // Object size and pattern table
 	.cycle     (cycle[2:0]),             // Cycle counter
-	.temp      (oam_bus),                // Info from temp buffer.
+	.temp      (is_pre_render_line ? 8'hFF : oam_bus),                // Info from temp buffer.
 	.vram_addr (sprite_vram_addr),       // [out] VRAM Address that we want data from
 	.vram_data (vram_din),               // [in] Data at the specified address
 	.load      (spriteset_load),
 	.load_in   (spriteset_load_in)       // Which parts of SpriteGen to load
+);
+
+wire [12:0] sprite_vram_addr_ex;
+wire [3:0] spriteset_load_ex;
+wire [26:0] spriteset_load_in_ex;
+wire use_ex;
+
+SpriteAddressGenEx address_gen_ex(
+	.clk       (clk),
+	.ce        (ce),
+	.enabled   (cycle[8] && !cycle[6]),  // Load sprites between 256..319
+	.obj_size  (obj_size),
+	.scanline  (scanline),
+	.obj_patt  (obj_patt),               // Object size and pattern table
+	.cycle     (cycle[2:0]),             // Cycle counter
+	.temp      (is_pre_render_line ? 8'hFF : oam_bus_ex),                // Info from temp buffer.
+	.vram_addr (sprite_vram_addr_ex),    // [out] VRAM Address that we want data from
+	.vram_data (vram_din),               // [in] Data at the specified address
+	.load      (spriteset_load_ex),
+	.load_in   (spriteset_load_in_ex),    // Which parts of SpriteGen to load
+	.use_ex    (use_ex)
 );
 
 // Between 0..255 (256 cycles), draws pixels.
@@ -1123,8 +1205,11 @@ SpriteSet sprite_gen(
 	.enable     (!cycle[8]),
 	.load       (spriteset_load),
 	.load_in    (spriteset_load_in),
+	.load_ex    (spriteset_load_ex),
+	.load_in_ex (spriteset_load_in_ex),
 	.bits       (obj_pixel_noblank),
-	.is_sprite0 (is_obj0_pixel)
+	.is_sprite0 (is_obj0_pixel),
+	.debug      (debug)
 );
 
 // Blank out obj in the leftmost 8 pixels?
@@ -1162,12 +1247,41 @@ PixelMuxer pixel_muxer(
 );
 
 // Compute the value to put on the VRAM address bus
-assign vram_a =
-	!is_rendering         ? loopy[13:0] :                                            // VRAM
-	(cycle[2:1] == 0)     ? {2'b10, loopy[11:0]} :                                   // Name table
-	(cycle[2:1] == 1)     ? {2'b10, loopy[11:10], 4'b1111, loopy[9:7], loopy[4:2]} : // Attribute table
-	cycle[8] && !cycle[6] ? {1'b0, sprite_vram_addr} :
-	{1'b0, bg_patt, bg_name_table, cycle[1], loopy[14:12]};                          // Pattern table bitmap #0, #1
+// assign vram_a =
+// 	!is_rendering         ? loopy[13:0] :                                            // VRAM
+// 	(cycle[2:1] == 0)     ? {2'b10, loopy[11:0]} :                                   // Name table
+// 	(cycle[2:1] == 1)     ? {2'b10, loopy[11:10], 4'b1111, loopy[9:7], loopy[4:2]} : // Attribute table
+// 	cycle[8] && !cycle[6] ? {1'b0, sprite_vram_addr} :
+// 	{1'b0, bg_patt, bg_name_table, cycle[1], loopy[14:12]};                          // Pattern table bitmap #0, #1
+
+
+// VRAM Address Assignment
+
+assign vram_a_ex = {1'b0, sprite_vram_addr_ex};
+
+always_comb begin
+	if (~is_rendering) begin
+		vram_a = loopy[13:0];
+		vram_r_ex = 0;
+	end else begin
+		// Extra sprite fetch override flag
+		if (cycle[8] && !cycle[6])
+			vram_r_ex = use_ex && debug;
+		else
+			vram_r_ex = 0;
+
+		//if (cycle > 336)                                                   // Dummy nametable
+		//		vram_a = {2'b10, loopy[11:0]};
+		if (cycle[2:1] == 0)
+			vram_a = {2'b10, loopy[11:0]};                                   // Name Table
+		else if (cycle[2:1] == 1)
+			vram_a = {2'b10, loopy[11:10], 4'b1111, loopy[9:7], loopy[4:2]}; // Attribute table
+		else if (cycle[8] && !cycle[6])
+			vram_a = {1'b0, sprite_vram_addr};                               // Sprite data
+		else
+			vram_a = {1'b0, bg_patt, bg_name_table, cycle[1], loopy[14:12]}; // Pattern table
+	end
+end
 
 // Read from VRAM, either when user requested a manual read, or when we're generating pixels.
 wire vram_r_ppudata = pre_read && (ain == 7);
@@ -1237,6 +1351,7 @@ end
 
 // If we're triggering a VBLANK NMI
 assign nmi = nmi_occured && vbl_enable;
+
 
 // One cycle after vram_r was asserted, the value
 // is available on the bus.

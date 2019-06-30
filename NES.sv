@@ -142,6 +142,8 @@ parameter CONF_STR = {
 	"-;",
 	"ONO,System Type,NTSC,PAL,Dendy;",
 	"-;",
+	"OP,Extra Sprites,Off,On;",
+	"-;",
 	"OG,Disk Swap,Auto,FDS button;",	
 	"O5,Invert Mirroring,Off,On;",
 	"-;",
@@ -521,6 +523,7 @@ reg [1:0] diskside;
 wire lightgun_en = |status[19:18];
 
 NES nes (
+	.debug           (status[25]),
 	.clk             (clk),
 	.reset_nes       (reset_nes),
 	.sys_type        (status[24:23]),
