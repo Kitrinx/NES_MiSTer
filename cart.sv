@@ -247,7 +247,9 @@ MMC2 mmc2(
 	.irq_b      (irq_b),
 	.flags_out_b(flags_out_b),
 	.audio_in   (audio_in),
-	.audio_b    (audio_out_b)
+	.audio_b    (audio_out_b),
+	// Special ports
+	.chr_ain_o  (chr_ain_orig)
 );
 
 //*****************************************************************************//
@@ -285,8 +287,7 @@ MMC3 mmc3 (
 	.audio_in   (audio_in),
 	.audio_b    (audio_out_b),
 	// Special ports
-	.chr_ain_o  (chr_ain_orig),
-	.chr_ex     (chr_ex)
+	.chr_ain_o  (chr_ain_orig)
 );
 
 //*****************************************************************************//
@@ -317,7 +318,9 @@ MMC4 mmc4(
 	.irq_b      (irq_b),
 	.flags_out_b(flags_out_b),
 	.audio_in   (audio_in),
-	.audio_b    (audio_out_b)
+	.audio_b    (audio_out_b),
+	// Special ports
+	.chr_ain_o  (chr_ain_orig)
 );
 
 //*****************************************************************************//
@@ -985,7 +988,9 @@ Mapper165 map165(
 	.irq_b      (irq_b),
 	.flags_out_b(flags_out_b),
 	.audio_in   (audio_in),
-	.audio_b    (audio_out_b)
+	.audio_b    (audio_out_b),
+	// Special ports
+	.chr_ain_o  (chr_ain_orig)
 );
 
 //*****************************************************************************//
@@ -1111,7 +1116,9 @@ Rambo1 rambo1(
 	.irq_b      (irq_b),
 	.flags_out_b(flags_out_b),
 	.audio_in   (audio_in),
-	.audio_b    (audio_out_b)
+	.audio_b    (audio_out_b),
+	// Special ports
+	.chr_ain_o  (chr_ain_orig)
 );
 
 //*****************************************************************************//
@@ -1520,7 +1527,8 @@ JYCompany jycompany(
 	.audio_in   (audio_in),
 	.audio_b    (audio_out_b),
 	// Special ports
-	.ppu_ce     (ppu_ce)
+	.ppu_ce     (ppu_ce),
+	.chr_ain_o  (chr_ain_orig)
 );
 
 //*****************************************************************************//

@@ -87,7 +87,7 @@ module NES(
 	output  [1:0] diskside_req,
 	input   [1:0] diskside,
 	input   [4:0] audio_channels, // Enabled audio channels
-	input         debug,
+	input         ex_sprites,
 
 	// Access signals for the SDRAM.
 	output [21:0] cpumem_addr,
@@ -390,13 +390,6 @@ wire [19:0] mapper_ppu_flags;   // PPU flags for mapper cheating
 wire [8:0] ppu_cycle;
 assign cycle = use_fake_h ? 9'd340 : ppu_cycle;
 
-// if (chr_aout[21:20] == 2'b10)
-// 	chr_aout[19:0] = {chr_aout[19:13] & chr_mask, chr_aout[12:0]};
-
-// Remap the CHR address into VRAM, if needed.
-//chr_aout = vram_ce ? {11'b11_0000_0000_0, vram_a10, chr_ain[9:0]} : chr_aout;
-
-
 PPU ppu(
 	.clk              (clk),
 	.ce               (ppu_ce),
@@ -423,7 +416,7 @@ PPU ppu(
 	.mapper_ppu_flags (mapper_ppu_flags),
 	.emphasis         (emphasis),
 	.short_frame      (skip_pixel),
-	.debug            (debug)
+	.extra_sprites    (ex_sprites)
 );
 
 

@@ -131,7 +131,7 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 // 0         1         2         3 
 // 01234567890123456789012345678901
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXX XXXXXXXXXXXXX     XX
+// XXXXXXXXXXX XXXXXXXXXXXXXX    XX
 
 `include "build_id.v"
 parameter CONF_STR = {
@@ -141,8 +141,6 @@ parameter CONF_STR = {
 	"H1F,BIN,Load FDS BIOS;",
 	"-;",
 	"ONO,System Type,NTSC,PAL,Dendy;",
-	"-;",
-	"OP,Extra Sprites,Off,On;",
 	"-;",
 	"OG,Disk Swap,Auto,FDS button;",	
 	"O5,Invert Mirroring,Off,On;",
@@ -157,6 +155,7 @@ parameter CONF_STR = {
 	"O8,Aspect Ratio,4:3,16:9;",
 	"O13,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"O4,Hide Overscan,Off,On;",
+	"OP,Extra Sprites,Off,On;",
 	"OCF,Palette,Smooth,Unsat.,FCEUX,NES Classic,Composite,PC-10,PVM,Wavebeam,Real,Sony CXA,YUV,Greyscale,Rockman9,Nintendulator;",
 	"-;",
 	"O9,Swap Joysticks,No,Yes;",
@@ -523,7 +522,7 @@ reg [1:0] diskside;
 wire lightgun_en = |status[19:18];
 
 NES nes (
-	.debug           (status[25]),
+	.ex_sprites      (status[25]),
 	.clk             (clk),
 	.reset_nes       (reset_nes),
 	.sys_type        (status[24:23]),
