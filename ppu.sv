@@ -366,22 +366,12 @@ reg [6:0] feed_cnt;
 
 reg sprite0_curr;
 
-//Cycles 1-64: Secondary OAM (32-byte buffer for current sprites on scanline) is initialized to $FF
-// - attempting to read $2004 will return $FF. Internally, the clear operation is implemented by reading from the OAM
-//and writing into the secondary OAM as usual, only a signal is active that makes the read always return $FF.
-
-//Cycles 65-256: Sprite evaluation
-// The first OAM entry to be checked during sprite evaluation is the one starting at OAM[OAMADDR]
-
-//Cycles 257-320: Sprite fetches (8 sprites total, 8 cycles per sprite)
-//Cycles 321-340+0: Background render pipeline initialization
-
 always @(posedge clk) begin :oam_eval
 reg n_ovr, ex_ovr;
 reg [1:0] eval_counter;
 
 // This should happen on the third cycle of rendering
-if (cycle == 0 && ce) begin
+if (cycle == 340 && ce) begin
 	sprite0 <= sprite0_curr;
 	sprite0_curr <= 0;
 end
@@ -429,7 +419,8 @@ end else if (ce) begin
 		end
 	end
 
-	if (evaluating || (visible && PAL)) begin
+	// XXX this is outside the "evaluating" block because of timing issues
+	if (rendering) begin
 		if (oam_state == STATE_IDLE) begin
 			oam_data <= oam_temp[0];
 			oam_temp_addr <= 0; // XXX: Confirm loc
@@ -443,13 +434,17 @@ end else if (ce) begin
 			feed_cnt <= 0;
 			eval_counter <= 0;
 			oam_bus_ex <= 32'hFFFFFFFF;
-		end else if (oam_state == STATE_CLEAR) begin               // Initialization state
+		end
+	end
+
+	if (evaluating || (visible && PAL)) begin
+		if (oam_state == STATE_CLEAR) begin               // Initialization state
 			if (cycle[0]) begin
 				oam_data <= 8'hFF;
 			end else if (~cycle[0]) begin
-				oam_temp[oam_temp_addr] <= oam_data;
+				oam_temp[oam_temp_addr] <= 8'hFF;
 				// Clear extra sprite space too
-				oam_temp[oam_temp_addr + 8'd32] <= oam_data;
+				oam_temp[oam_temp_addr + 8'd32] <= 8'hFF;
 				oam_temp_addr <= oam_temp_addr + 1'b1;
 			end
 
@@ -459,7 +454,6 @@ end else if (ce) begin
 				if (scanline >= oam[{oam_addr_ex, 2'b00}] && scanline < oam[{oam_addr_ex, 2'b00}] + (obj_size ? 16 : 8))
 					spr_counter <= spr_counter + 1'b1;
 			end
-
 		end else if (oam_state == STATE_EVAL) begin             // Evaluation State
 			// This phase has exactly enough cycles to evaluate all 64 sprites if 8 are on the current line,
 			// so extra sprite evaluation has to be done seperately.
@@ -551,7 +545,7 @@ end else if (ce) begin
 	if (oam_state == STATE_FETCH && rendering)
 		oam_addr <= 0;
 
-	if (is_vbe && cycle == 339)
+	if (is_vbe && cycle == 340)
 		spr_overflow <= 0;
 
 	// Disabling rendering during OAM evaluation will trigger a glitch causing the current address to be incremented by 1
@@ -1029,7 +1023,7 @@ SpriteAddressGenEx address_gen_ex(
 	.scanline  (scanline),
 	.obj_patt  (obj_patt),               // Object size and pattern table
 	.cycle     (cycle[2:0]),             // Cycle counter
-	.temp      (is_pre_render_line || ~|scanline ? 8'hFF : oam_bus_ex),                // Info from temp buffer.
+	.temp      (is_pre_render_line ? 8'hFF : oam_bus_ex),                // Info from temp buffer.
 	.vram_addr (sprite_vram_addr_ex),    // [out] VRAM Address that we want data from
 	.vram_data (vram_din),               // [in] Data at the specified address
 	.load      (spriteset_load_ex),
