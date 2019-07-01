@@ -418,7 +418,7 @@ end else if (ce) begin
 	end
 
 	// XXX this is outside the "evaluating" block because of timing issues
-	if (rendering) begin	
+	if (rendering) begin
 		if (oam_state == STATE_IDLE) begin
 			oam_data <= oam_temp[0];
 			oam_temp_addr <= 0; // XXX: Confirm loc
@@ -493,13 +493,15 @@ end else if (ce) begin
 							{n_ovr, oam_addr} <= {1'b0, oam_addr} + 9'd1;
 
 							if (&eval_counter) begin // end of copy
-								oam_temp_slot <= oam_temp_slot+ 1'b1;
+								{n_ovr, oam_addr} <= {oam_addr[7:2] + 7'd1, 2'b00};
+								if (oam_temp_wren)
+									oam_temp_slot <= oam_temp_slot+ 1'b1;
 								if (oam_temp_slot == 7)
 									oam_temp_wren <= 0;
 							end
 						end
 					end else begin
-						oam_addr <= {oam_addr[6:2] + 1'd1, 2'b00};
+						oam_addr <= {oam_addr[7:2] + 1'd1, 2'b00};
 						oam_data <= oam_temp[{1'b0, oam_temp_slot, 2'b00}];
 					end
 				end
@@ -543,18 +545,6 @@ end else if (ce) begin
 
 	if (is_vbe && cycle == 340)
 		spr_overflow <= 0;
-
-	// Disabling rendering during OAM evaluation will trigger a glitch causing the current address to be incremented by 1
-	// The increment can be "delayed" by 1 PPU cycle depending on whether or not rendering is disabled on an even/odd cycle
-	// e.g, if rendering is disabled on an even cycle, the following PPU cycle will increment the address by 5 (instead of 4)
-	//      if rendering is disabled on an odd cycle, the increment will wait until the next odd cycle (at which point it will be incremented by 1)
-	// In practice, there is no way to see the difference, so we just increment by 1 at the end of the next cycle after rendering was disabled
-	if (visible) begin
-		old_rendering <= rendering_enabled;
-		if (old_rendering && ~rendering_enabled) begin
-			oam_addr <= oam_addr + 1'b1;
-		end
-	end
 
 	// Writes to OAMDATA during rendering (on the pre-render line and the visible lines 0-239,
 	// provided either sprite or background rendering is enabled) do not modify values in OAM,
