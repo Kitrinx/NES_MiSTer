@@ -95,9 +95,30 @@ always @(posedge clk) if (ce) begin
 		ppu_address_latch <= !ppu_address_latch;
 	end else if (read && ain == 2) begin
 		ppu_address_latch <= 0; //Reset PPU address latch
-	end else if ((read || write) && ain == 7 && !is_rendering) begin
+	end else if ((read || write) && ain == 7) begin
 		// Increment address every time we accessed a reg
-		loopy_v <= loopy_v + (ppu_incr ? 15'd32 : 15'd1);
+		if (~is_rendering) begin
+			loopy_v <= loopy_v + (ppu_incr ? 15'd32 : 15'd1);
+		end else begin
+			// During rendering (on the pre-render line and the visible lines 0-239, provided either background or sprite rendering is 
+			// enabled), it will update v in an odd way, triggering a coarse X increment and a Y increment simultaneously (with normal 
+			// wrapping behavior). Internally, this is caused by the carry inputs to various sections of v being set up for rendering, 
+			// and the $2007 access triggering a "load next value" signal for all of v (when not rendering, the carry inputs are set up 
+			// to linearly increment v by either 1 or 32). This behavior is not affected by the status of the increment bit. The Young 
+			// Indiana Jones Chronicles uses this for some effects to adjust the Y scroll during rendering, and also Burai Fighter (U) 
+			// to draw the scorebar.
+			loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
+			loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
+			loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
+			if (loopy_v[14:12] == 7) begin
+				if (loopy_v[9:5] == 29) begin
+					loopy_v[9:5] <= 0;
+					loopy_v[11] <= !loopy_v[11];
+				end else begin
+					loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
+				end
+			end
+		end
 	end
 end
 
@@ -378,15 +399,17 @@ end
 if (reset) begin
 	oam_temp <= '{64{8'hFF}};
 	oam_data <= oam_temp[0];
-	oam_temp_addr <= 0; // XXX: Confirm loc
+	oam_temp_addr <= 0;
 	oam_temp_slot <= 0;
 	oam_temp_wren <= 1;
+	oam <= '{256{8'h00}}; // Clearing ram fixes corruption in Huge Insect
 	oam_temp_slot_ex <= 0;
 	n_ovr <= 0;
 	spr_counter <= 0;
 	sprite0 <= 0;
 	sprite0_curr <= 0;
 	feed_cnt <= 0;
+	spr_overflow <= 0;
 	eval_counter <= 0;
 	ex_ovr <= 0;
 	oam_state <= STATE_IDLE;
@@ -421,7 +444,7 @@ end else if (ce) begin
 	if (rendering) begin
 		if (oam_state == STATE_IDLE) begin
 			oam_data <= oam_temp[0];
-			oam_temp_addr <= 0; // XXX: Confirm loc
+			oam_temp_addr <= 0;
 			oam_temp_slot <= 0;
 			oam_temp_wren <= 1;
 			oam_temp_slot_ex <= 0;
@@ -474,28 +497,33 @@ end else if (ce) begin
 						if (oam_temp_wren)
 							oam_temp[{oam_temp_slot, oam_addr[1:0]}] <= oam_data;
 						else
-							oam_data <= oam_temp[{1'b0, oam_temp_slot, oam_addr[1:0]}];
+							oam_data <= oam_temp[{1'b0, oam_temp_slot, 2'b00}];
 						if (~|eval_counter) begin // m is 0
 							if (scanline >= oam_data && scanline < oam_data + (obj_size ? 16 : 8)) begin
 								if (~oam_temp_wren)
 									spr_overflow <= 1;
-								eval_counter <= eval_counter + 2'd1;
 								if (~|oam_addr[7:2])
 									sprite0_curr <= 1'b1;
+								eval_counter <= eval_counter + 2'd1;
 								{n_ovr, oam_addr} <= {1'b0, oam_addr} + 9'd1; // is good, copy
 							end else begin
-								{n_ovr, oam_addr} <= ((~oam_temp_wren && ~spr_overflow) ?
-								({1'b0, {oam_addr[7:2], oam_addr[1:0] + 2'd1}} + 9'd4) : // Sprite overflow bug emulation
-								({1'b0, oam_addr} + 9'd4)); // skip to next sprite
+								if (~oam_temp_wren) begin  // Sprite overflow bug emulation
+									{n_ovr, oam_addr[7:2]} <= oam_addr[7:2] + 7'd1;
+									oam_addr[1:0] <= oam_addr[1:0] + 2'd1;
+								end else begin                              // skip to next sprite
+									{n_ovr, oam_addr} <= oam_addr + 9'd4;
+								end
 							end
 						end else begin
 							eval_counter <= eval_counter + 2'd1;
 							{n_ovr, oam_addr} <= {1'b0, oam_addr} + 9'd1;
-
 							if (&eval_counter) begin // end of copy
-								{n_ovr, oam_addr} <= {oam_addr[7:2] + 7'd1, 2'b00};
-								if (oam_temp_wren)
+								if (oam_temp_wren) begin
 									oam_temp_slot <= oam_temp_slot+ 1'b1;
+								end else begin
+									n_ovr <= 1;
+								end
+
 								if (oam_temp_slot == 7)
 									oam_temp_wren <= 0;
 							end
@@ -796,18 +824,19 @@ module PaletteRam
 	input [4:0] addr,
 	input [5:0] din,
 	output [5:0] dout,
-	input write
+	input write,
+	input reset
 );
 
 reg [5:0] palette [32] = '{
-	'h0F,'h2C,'h10,'h1C,
-	'h0F,'h37,'h27,'h07,
-	'h0F,'h28,'h16,'h07,
-	'h0F,'h28,'h0F,'h2C,
-	'h0F,'h0F,'h2C,'h11,
-	'h0F,'h0F,'h20,'h38,
-	'h0F,'h0F,'h15,'h27,
-	'h0F,'h0F,'h11,'h3C
+	6'h09, 6'h01, 6'h00, 6'h01,
+	6'h00, 6'h02, 6'h02, 6'h0D,
+	6'h08, 6'h10, 6'h08, 6'h24,
+	6'h00, 6'h00, 6'h04, 6'h2C,
+	6'h09, 6'h01, 6'h34, 6'h03,
+	6'h00, 6'h04, 6'h00, 6'h14,
+	6'h08, 6'h3A, 6'h00, 6'h02,
+	6'h00, 6'h20, 6'h2C, 6'h08
 };
 
 // Force read from backdrop channel if reading from any addr 0.
@@ -817,7 +846,18 @@ reg [5:0] palette [32] = '{
 wire [4:0] addr2 = (addr[1:0] == 0) ? {1'b0, addr[3:0]} : addr;
 assign dout = palette[addr2];
 
-always @(posedge clk) if (ce && write) begin
+always @(posedge clk) if (reset)
+	palette <= '{
+		6'h09, 6'h01, 6'h00, 6'h01,
+		6'h00, 6'h02, 6'h02, 6'h0D,
+		6'h08, 6'h10, 6'h08, 6'h24,
+		6'h00, 6'h00, 6'h04, 6'h2C,
+		6'h09, 6'h01, 6'h34, 6'h03,
+		6'h00, 6'h04, 6'h00, 6'h14,
+		6'h08, 6'h3A, 6'h00, 6'h02,
+		6'h00, 6'h20, 6'h2C, 6'h08
+	};
+else if (ce && write) begin
 	palette[addr2] <= din;
 end
 
@@ -957,23 +997,24 @@ wire [3:0] bg_pixel = {bg_pixel_noblank[3:2], show_bg_on_pixel ? bg_pixel_noblan
 wire [31:0] oam_bus_ex;
 
 OAMEval spriteeval (
-	.clk (clk),
-	.ce (ce),
-	.reset(reset),
-	.rendering_enabled(enable_objects | enable_playfield),
-	.obj_size(obj_size),
-	.scanline(scanline),
-	.cycle(cycle),
-	.oam_bus(oam_bus),
-	.oam_bus_ex(oam_bus_ex),
-	.oam_addr_write(write && (ain == 3)),
-	.oam_data_write(write && (ain == 4)),
-	.oam_din(din),
-	.spr_overflow(sprite_overflow),
-	.sprite0(obj0_on_line),
-	.is_vbe(is_vbe_sl),
-	.PAL(sys_type[0])
+	.clk               (clk),
+	.ce                (ce),
+	.reset             (reset),
+	.rendering_enabled (enable_objects | enable_playfield),
+	.obj_size          (obj_size),
+	.scanline          (scanline),
+	.cycle             (cycle),
+	.oam_bus           (oam_bus),
+	.oam_bus_ex        (oam_bus_ex),
+	.oam_addr_write    (write && (ain == 3)),
+	.oam_data_write    (write && (ain == 4)),
+	.oam_din           (din),
+	.spr_overflow      (sprite_overflow),
+	.sprite0           (obj0_on_line),
+	.is_vbe            (is_vbe_sl),
+	.PAL               (sys_type[0])
 );
+
 
 wire [7:0] oam_bus;
 wire sprite_overflow;
@@ -1087,7 +1128,7 @@ always_comb begin
 		else
 			vram_r_ex = 0;
 
-		//if (cycle > 336)                                                   // Dummy nametable
+		//if (cycle > 336)                                                   // Dummy nametable?
 		//		vram_a = {2'b10, loopy[11:0]};
 		if (cycle[2:1] == 0)
 			vram_a = {2'b10, loopy[11:0]};                                   // Name Table
@@ -1115,6 +1156,7 @@ wire [4:0] pram_addr = is_rendering ?
 
 PaletteRam palette_ram(
 	.clk   (clk),
+	.reset (reset),
 	.ce    (ce),
 	.addr  (pram_addr), // Read addr
 	.din   (din[5:0]),  // Value to write
