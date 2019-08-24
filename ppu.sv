@@ -29,6 +29,9 @@ reg [14:0] loopy_t;
 reg [2:0] loopy_x;
 // Latch
 reg ppu_address_latch;
+reg [7:0] din_shift[2];
+reg write_shift[2];
+reg latch_shift[2];
 
 initial begin
 	ppu_incr = 0;
@@ -71,6 +74,10 @@ always @(posedge clk) if (ce) begin
 		end
 	end
 
+	latch_shift[0] <= 0;
+	din_shift[0] <= 0;
+	write_shift[0] <= 0;
+
 	if (write && ain == 0) begin
 		loopy_t[10] <= din[0];
 		loopy_t[11] <= din[1];
@@ -85,13 +92,9 @@ always @(posedge clk) if (ce) begin
 		end
 		ppu_address_latch <= !ppu_address_latch;
 	end else if (write && ain == 6) begin
-		if (!ppu_address_latch) begin
-			loopy_t[13:8] <= din[5:0];
-			loopy_t[14] <= 0;
-		end else begin
-			loopy_t[7:0] <= din;
-			loopy_v <= {loopy_t[14:8], din};
-		end
+		latch_shift[0] <= ppu_address_latch;
+		din_shift[0] <= din;
+		write_shift[0] <= 1;
 		ppu_address_latch <= !ppu_address_latch;
 	end else if (read && ain == 2) begin
 		ppu_address_latch <= 0; //Reset PPU address latch
@@ -118,6 +121,20 @@ always @(posedge clk) if (ce) begin
 					loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
 				end
 			end
+		end
+	end
+
+	latch_shift[1] <= latch_shift[0];
+	din_shift[1] <= din_shift[0];
+	write_shift[1] <= write_shift[0];
+
+	if (write_shift[1]) begin
+		if (!latch_shift[1]) begin
+			loopy_t[13:8] <= din_shift[1][5:0];
+			loopy_t[14] <= 0;
+		end else begin
+			loopy_t[7:0] <= din_shift[1];
+			loopy_v <= {loopy_t[14:8], din_shift[1]};
 		end
 	end
 end
@@ -154,6 +171,7 @@ wire [8:0] vblank_start_sl;
 wire [8:0] vblank_end_sl;
 wire [8:0] last_sl;
 wire skip_en;
+reg rendering_sr;
 
 always_comb begin
 	case (sys_type)
@@ -183,13 +201,13 @@ assign at_last_cycle_group = (cycle[8:3] == 42);
 // In Visual 2C02, the counter starts at zero and flips at scanline 256.
 assign short_frame = end_of_line & skip_pixel;
 
-wire skip_pixel = is_pre_render && ~even_frame_toggle && is_rendering && skip_en;
+wire skip_pixel = is_pre_render && ~even_frame_toggle && rendering_sr && skip_en;
 assign end_of_line = at_last_cycle_group && (cycle[3:0] == (skip_pixel ? 3 : 4));
 
 // Confimed with Visual 2C02
 // All vblank clocked registers should have changed and be readable by cycle 1 of 241/261
-assign entering_vblank = (cycle == 0) && scanline == vblank_start_sl;
-assign exiting_vblank = (cycle == 0) && is_pre_render;
+assign entering_vblank = (cycle == 1) && scanline == vblank_start_sl;
+assign exiting_vblank = (cycle == 1) && is_pre_render;
 
 assign is_vbe_sl = (scanline == vblank_end_sl);
 
@@ -201,10 +219,10 @@ always @(posedge clk) if (reset) begin
 	cycle <= 0;
 	is_in_vblank <= 0;
 end else if (ce) begin
+	rendering_sr <= is_rendering;
 	cycle <= end_of_line ? 9'd0 : cycle + 9'd1;
 	is_in_vblank <= new_is_in_vblank;
 end
-
 
 always @(posedge clk) if (reset) begin
 	scanline <= 0;
@@ -393,6 +411,8 @@ reg [1:0] eval_counter;
 reg old_rendering;
 reg [8:0] last_y, last_tile, last_attr;
 
+reg [1:0] overflow;
+
 // This should happen on the third cycle of rendering
 if (cycle == 340 && ce) begin
 	sprite0 <= sprite0_curr;
@@ -412,7 +432,7 @@ if (reset) begin
 	sprite0 <= 0;
 	sprite0_curr <= 0;
 	feed_cnt <= 0;
-	spr_overflow <= 0;
+	overflow <= 0;
 	eval_counter <= 0;
 	ex_ovr <= 0;
 	oam_state <= STATE_IDLE;
@@ -505,7 +525,7 @@ end else if (ce) begin
 						if (~|eval_counter) begin // m is 0
 							if (scanline[7:0] >= oam_data && scanline[7:0] < oam_data + (obj_size ? 16 : 8)) begin
 								if (~oam_temp_wren)
-									spr_overflow <= 1;
+									overflow[0] <= 1;
 								if (~|oam_addr[7:2])
 									sprite0_curr <= 1'b1;
 								eval_counter <= eval_counter + 2'd1;
@@ -593,8 +613,14 @@ end else if (ce) begin
 	if (oam_state == STATE_FETCH && rendering)
 		oam_addr <= 0;
 
-	if (is_vbe && cycle == 340)
+	// XXX: This delay is nessisary probably because the OAM handling is a couple of cycles early
+	overflow[1] <= overflow[0];
+	spr_overflow <= overflow[1];
+
+	if (scanline == 511 && cycle == 0) begin
+		overflow <= 0;
 		spr_overflow <= 0;
+	end
 
 	// Writes to OAMDATA during rendering (on the pre-render line and the visible lines 0-239,
 	// provided either sprite or background rendering is enabled) do not modify values in OAM,
@@ -852,7 +878,7 @@ module PaletteRam
 );
 
 reg [5:0] palette [32] = '{
-	6'h09, 6'h01, 6'h00, 6'h01,
+	6'h00, 6'h01, 6'h00, 6'h01,
 	6'h00, 6'h02, 6'h02, 6'h0D,
 	6'h08, 6'h10, 6'h08, 6'h24,
 	6'h00, 6'h00, 6'h04, 6'h2C,
@@ -871,7 +897,7 @@ assign dout = palette[addr2];
 
 always @(posedge clk) if (reset)
 	palette <= '{
-		6'h09, 6'h01, 6'h00, 6'h01,
+		6'h00, 6'h01, 6'h00, 6'h01,
 		6'h00, 6'h02, 6'h02, 6'h0D,
 		6'h08, 6'h10, 6'h08, 6'h24,
 		6'h00, 6'h00, 6'h04, 6'h2C,
@@ -898,8 +924,6 @@ module PPU(
 	input         read,             // read
 	input         write,            // write
 	output reg    nmi,              // one while inside vblank
-	input         pre_read,
-	input         pre_write,
 	output        vram_r,           // read from vram active
 	output        vram_r_ex,        // use extra sprite address
 	output        vram_w,           // write to vram active
@@ -951,8 +975,6 @@ wire exiting_vblank;      // At the very last cycle of the vblank
 wire entering_vblank;     //
 wire is_pre_render_line;  // True while we're on the pre render scanline
 
-// Confirmed in Visual 2C02, rendering enabled is latched from bck_enable and spr_enable,
-// which are themselves registers. Therefor, there is one extra cycle of delay.
 reg rendering_enabled;
 
 // 2C02 has an "is_vblank" flag that is true from pixel 0 of line 241 to pixel 0 of line 0;
@@ -1111,11 +1133,14 @@ wire show_obj_on_pixel = (object_clip || (cycle[7:3] != 0)) && enable_objects;
 wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_obj_on_pixel ? obj_pixel_noblank[1:0] : 2'b00};
 
 reg sprite0_hit_bg;            // True if sprite#0 has collided with the BG in the last frame.
+reg sprite0_hit_latch;
 always @(posedge clk) if (ce) begin
 	rendering_enabled <= (enable_objects | enable_playfield);
-	if (cycle == 340 && is_vbe_sl) // confirmed with visual 2C02 (261, 1);
+	sprite0_hit_bg <= sprite0_hit_latch;
+	if (cycle == 0 && scanline == 511) begin// confirmed with visual 2C02 (261, 1);
 		sprite0_hit_bg <= 0;
-	else if (
+		sprite0_hit_latch <= 0;
+	end else if (
 		is_rendering        &&    // Object rendering is enabled
 		!cycle[8]           &&    // X Pixel 0..255
 		cycle[7:0] != 255   &&    // X pixel != 255
@@ -1125,7 +1150,7 @@ always @(posedge clk) if (ce) begin
 		show_obj_on_pixel   &&
 		bg_pixel[1:0] != 0) begin // Background pixel nonzero.
 
-			sprite0_hit_bg <= 1;
+			sprite0_hit_latch <= 1;
 	end
 end
 
@@ -1169,12 +1194,12 @@ always_comb begin
 end
 
 // Read from VRAM, either when user requested a manual read, or when we're generating pixels.
-wire vram_r_ppudata = pre_read && (ain == 7);
+wire vram_r_ppudata = read && (ain == 7);
 
 assign vram_r = vram_r_ppudata || is_rendering && cycle[0] == 0 && !end_of_line;
 
 // Write to VRAM?
-assign vram_w = pre_write && (ain == 7) && !is_pal_address && !is_rendering;
+assign vram_w = write && (ain == 7) && !is_pal_address && !is_rendering;
 
 wire [5:0] color2;
 wire [4:0] pram_addr = is_rendering ?
@@ -1197,7 +1222,8 @@ wire mask_left = (cycle < 8) && ((|mask && ~&mask) || auto_mask);
 wire mask_right = cycle > 247 && mask == 2'b10;
 // PAL/Dendy masks scanline 0 and 2 pixels on each side with black.
 wire mask_pal = (|sys_type && pal_mask);
-assign color = (mask_right | mask_left | mask_pal) ? 6'h0E : (grayscale ? {color2[5:4], 4'b0} : color2);
+wire [5:0] color1 = (grayscale ? {color2[5:4], 4'b0} : color2);
+assign color = (mask_right | mask_left | mask_pal) ? 6'h0E : color1;
 
 reg enable_playfield, enable_objects;
 
@@ -1284,42 +1310,42 @@ always @(posedge clk) begin
 			decay_low <= decay_low - 1'b1;
 		else
 			latched_dout[4:0] <= 5'b00000;
+	end
 
-		if (read) begin
-			case (ain)
-				2: begin
-					latched_dout <= {nmi_occured,
-									sprite0_hit_bg,
-									sprite_overflow,
-									latched_dout[4:0]};
-					refresh_high <= 1'b1;
-				end
+	if (read) begin
+		case (ain)
+			2: begin
+				latched_dout <= {nmi_occured,
+								sprite0_hit_bg,
+								sprite_overflow,
+								latched_dout[4:0]};
+				refresh_high <= 1'b1;
+			end
 
-				4: begin
-					latched_dout <= oam_bus;
+			4: begin
+				latched_dout <= oam_bus;
+				refresh_high <= 1'b1;
+				refresh_low <= 1'b1;
+			end
+
+			7: if (is_pal_address) begin
+					latched_dout <= {latched_dout[7:6], color1};
+					refresh_low <= 1'b1;
+				end else begin
+					latched_dout <= vram_latch;
 					refresh_high <= 1'b1;
 					refresh_low <= 1'b1;
 				end
+			default: latched_dout <= latched_dout;
+		endcase
 
-				7: if (is_pal_address) begin
-						latched_dout <= {latched_dout[7:6], color};
-						refresh_low <= 1'b1;
-					end else begin
-						latched_dout <= vram_latch;
-						refresh_high <= 1'b1;
-						refresh_low <= 1'b1;
-					end
-				default: latched_dout <= latched_dout;
-			endcase
+		if (reset)
+			latched_dout <= 8'd0;
 
-			if (reset)
-				latched_dout <= 8'd0;
-
-		end else if (write) begin
-			refresh_high <= 1'b1;
-			refresh_low <= 1'b1;
-			latched_dout <= din;
-		end
+	end else if (write) begin
+		refresh_high <= 1'b1;
+		refresh_low <= 1'b1;
+		latched_dout <= din;
 	end
 end
 
