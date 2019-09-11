@@ -8,6 +8,7 @@
 module LoopyGen (
 	input clk,
 	input ce,
+	input reset,
 	input is_rendering,
 	input [2:0] ain,     // input address from CPU
 	input [7:0] din,     // data input
@@ -15,6 +16,7 @@ module LoopyGen (
 	input write,         // write
 	input is_pre_render, // Is this the pre-render scanline
 	input [8:0] cycle,
+	input [8:0] scanline,
 	output [14:0] loopy,
 	output [2:0] fine_x_scroll  // Current loopy value
 );
@@ -28,10 +30,10 @@ reg [14:0] loopy_t;
 // Fine X scroll (3 bits)
 reg [2:0] loopy_x;
 // Latch
-reg ppu_address_latch;
+reg ppu_address_latch, ppu_scroll_latch;
 reg [7:0] din_shift[2];
 reg write_shift[2];
-reg latch_shift[2];
+reg reset_pending = 1;
 
 initial begin
 	ppu_incr = 0;
@@ -42,100 +44,109 @@ initial begin
 end
 
 // Handle updating loopy_t and loopy_v
-always @(posedge clk) if (ce) begin
-	if (is_rendering) begin
-		// Increment course X scroll right after attribute table byte was fetched.
-		if (cycle[2:0] == 3 && (cycle < 256 || cycle >= 320 && cycle < 336)) begin
-			loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
-			loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
+always @(posedge clk) begin
+	if (reset) reset_pending <= 1;
+	if (ce) begin
+		if (is_rendering) begin
+			// Increment course X scroll right after attribute table byte was fetched.
+			if (cycle[2:0] == 3 && (cycle < 256 || cycle >= 320 && cycle < 336)) begin
+				loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
+				loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
+			end
+
+			// Vertical Increment
+			if (cycle == 251) begin
+				loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
+				if (loopy_v[14:12] == 7) begin
+					if (loopy_v[9:5] == 29) begin
+						loopy_v[9:5] <= 0;
+						loopy_v[11] <= !loopy_v[11];
+					end else begin
+						loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
+					end
+				end
+			end
+
+			// Horizontal Reset at cycle 257
+			if (cycle == 256)
+				{loopy_v[10], loopy_v[4:0]} <= {loopy_t[10], loopy_t[4:0]};
+
+			// On cycle 256 of each scanline, copy horizontal bits from loopy_t into loopy_v
+			// On cycle 304 of the pre-render scanline, copy loopy_t into loopy_v
+			if (cycle == 304 && is_pre_render) begin
+				loopy_v <= loopy_t;
+			end
 		end
 
-		// Vertical Increment
-		if (cycle == 251) begin
-			loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
-			if (loopy_v[14:12] == 7) begin
-				if (loopy_v[9:5] == 29) begin
-					loopy_v[9:5] <= 0;
-					loopy_v[11] <= !loopy_v[11];
-				end else begin
-					loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
+		din_shift[0] <= 0;
+		write_shift[0] <= 0;
+
+		if (write && ain == 0) begin
+			loopy_t[10] <= din[0];
+			loopy_t[11] <= din[1];
+			ppu_incr <= din[2];
+		end else if (write && ain == 5) begin
+			if (!ppu_address_latch) begin
+				loopy_t[4:0] <= din[7:3];
+				loopy_x <= din[2:0];
+			end else begin
+				loopy_t[9:5] <= din[7:3];
+				loopy_t[14:12] <= din[2:0];
+			end
+			ppu_address_latch <= !ppu_address_latch;
+		end else if (write && ain == 6) begin
+			if (!ppu_address_latch) begin
+				loopy_t[13:8] <= din[5:0];
+				loopy_t[14] <= 0;
+			end else begin
+				loopy_t[7:0] <= din;
+				din_shift[0] <= din;
+				write_shift[0] <= 1;
+			end
+
+			ppu_address_latch <= !ppu_address_latch;
+		end else if (read && ain == 2) begin
+			ppu_address_latch <= 0; //Reset PPU address latch
+		end else if ((read || write) && ain == 7) begin
+			// Increment address every time we accessed a reg
+			if (~is_rendering) begin
+				loopy_v <= loopy_v + (ppu_incr ? 15'd32 : 15'd1);
+			end else begin
+				// During rendering (on the pre-render line and the visible lines 0-239, provided either background or sprite rendering is 
+				// enabled), it will update v in an odd way, triggering a coarse X increment and a Y increment simultaneously (with normal 
+				// wrapping behavior). Internally, this is caused by the carry inputs to various sections of v being set up for rendering, 
+				// and the $2007 access triggering a "load next value" signal for all of v (when not rendering, the carry inputs are set up 
+				// to linearly increment v by either 1 or 32). This behavior is not affected by the status of the increment bit. The Young 
+				// Indiana Jones Chronicles uses this for some effects to adjust the Y scroll during rendering, and also Burai Fighter (U) 
+				// to draw the scorebar.
+				loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
+				loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
+				loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
+				if (loopy_v[14:12] == 7) begin
+					if (loopy_v[9:5] == 29) begin
+						loopy_v[9:5] <= 0;
+						loopy_v[11] <= !loopy_v[11];
+					end else begin
+						loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
+					end
 				end
 			end
 		end
 
-		// Horizontal Reset at cycle 257
-		if (cycle == 256)
-			{loopy_v[10], loopy_v[4:0]} <= {loopy_t[10], loopy_t[4:0]};
+		din_shift[1] <= din_shift[0];
+		write_shift[1] <= write_shift[0];
 
-		// On cycle 256 of each scanline, copy horizontal bits from loopy_t into loopy_v
-		// On cycle 304 of the pre-render scanline, copy loopy_t into loopy_v
-		if (cycle == 304 && is_pre_render) begin
-			loopy_v <= loopy_t;
-		end
-	end
-
-	latch_shift[0] <= 0;
-	din_shift[0] <= 0;
-	write_shift[0] <= 0;
-
-	if (write && ain == 0) begin
-		loopy_t[10] <= din[0];
-		loopy_t[11] <= din[1];
-		ppu_incr <= din[2];
-	end else if (write && ain == 5) begin
-		if (!ppu_address_latch) begin
-			loopy_t[4:0] <= din[7:3];
-			loopy_x <= din[2:0];
-		end else begin
-			loopy_t[9:5] <= din[7:3];
-			loopy_t[14:12] <= din[2:0];
-		end
-		ppu_address_latch <= !ppu_address_latch;
-	end else if (write && ain == 6) begin
-		latch_shift[0] <= ppu_address_latch;
-		din_shift[0] <= din;
-		write_shift[0] <= 1;
-		ppu_address_latch <= !ppu_address_latch;
-	end else if (read && ain == 2) begin
-		ppu_address_latch <= 0; //Reset PPU address latch
-	end else if ((read || write) && ain == 7) begin
-		// Increment address every time we accessed a reg
-		if (~is_rendering) begin
-			loopy_v <= loopy_v + (ppu_incr ? 15'd32 : 15'd1);
-		end else begin
-			// During rendering (on the pre-render line and the visible lines 0-239, provided either background or sprite rendering is 
-			// enabled), it will update v in an odd way, triggering a coarse X increment and a Y increment simultaneously (with normal 
-			// wrapping behavior). Internally, this is caused by the carry inputs to various sections of v being set up for rendering, 
-			// and the $2007 access triggering a "load next value" signal for all of v (when not rendering, the carry inputs are set up 
-			// to linearly increment v by either 1 or 32). This behavior is not affected by the status of the increment bit. The Young 
-			// Indiana Jones Chronicles uses this for some effects to adjust the Y scroll during rendering, and also Burai Fighter (U) 
-			// to draw the scorebar.
-			loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
-			loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
-			loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
-			if (loopy_v[14:12] == 7) begin
-				if (loopy_v[9:5] == 29) begin
-					loopy_v[9:5] <= 0;
-					loopy_v[11] <= !loopy_v[11];
-				end else begin
-					loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
-				end
-			end
-		end
-	end
-
-	latch_shift[1] <= latch_shift[0];
-	din_shift[1] <= din_shift[0];
-	write_shift[1] <= write_shift[0];
-
-	if (write_shift[1]) begin
-		if (!latch_shift[1]) begin
-			loopy_t[13:8] <= din_shift[1][5:0];
-			loopy_t[14] <= 0;
-		end else begin
-			loopy_t[7:0] <= din_shift[1];
+		if (write_shift[1])
 			loopy_v <= {loopy_t[14:8], din_shift[1]};
+
+		if (reset_pending && cycle == 0 && scanline == 511) begin
+			ppu_address_latch <= 0;
+			ppu_incr <= 0;
+			loopy_t <= 0;
+			loopy_x <= 0;
+			reset_pending <= 0;
 		end
+
 	end
 end
 
@@ -171,24 +182,24 @@ wire [8:0] vblank_start_sl;
 wire [8:0] vblank_end_sl;
 wire [8:0] last_sl;
 wire skip_en;
-reg rendering_sr;
+reg [5:0] rendering_sr;
 
 always_comb begin
 	case (sys_type)
 		2'b00,2'b11: begin // NTSC/Vs.
-			vblank_start_sl = 9'd241;
+			vblank_start_sl = 9'd240;
 			vblank_end_sl   = 9'd260;
 			skip_en         = 1'b1;
 		end
 
 		2'b01: begin       // PAL
-			vblank_start_sl = 9'd241;
+			vblank_start_sl = 9'd240;
 			vblank_end_sl   = 9'd310;
 			skip_en         = 1'b0;
 		end
 
 		2'b10: begin       // Dendy
-			vblank_start_sl = 9'd291;
+			vblank_start_sl = 9'd290;
 			vblank_end_sl   = 9'd310;
 			skip_en         = 1'b0;
 		end
@@ -201,13 +212,13 @@ assign at_last_cycle_group = (cycle[8:3] == 42);
 // In Visual 2C02, the counter starts at zero and flips at scanline 256.
 assign short_frame = end_of_line & skip_pixel;
 
-wire skip_pixel = is_pre_render && ~even_frame_toggle && rendering_sr && skip_en;
+wire skip_pixel = is_pre_render && ~even_frame_toggle && rendering_sr[3] && skip_en;
 assign end_of_line = at_last_cycle_group && (cycle[3:0] == (skip_pixel ? 3 : 4));
 
 // Confimed with Visual 2C02
 // All vblank clocked registers should have changed and be readable by cycle 1 of 241/261
-assign entering_vblank = (cycle == 1) && scanline == vblank_start_sl;
-assign exiting_vblank = (cycle == 1) && is_pre_render;
+assign entering_vblank = (cycle == 340) && scanline == vblank_start_sl;
+assign exiting_vblank = (cycle == 340) && scanline == vblank_end_sl;
 
 assign is_vbe_sl = (scanline == vblank_end_sl);
 
@@ -219,7 +230,7 @@ always @(posedge clk) if (reset) begin
 	cycle <= 0;
 	is_in_vblank <= 0;
 end else if (ce) begin
-	rendering_sr <= is_rendering;
+	rendering_sr <= {rendering_sr[4:0], is_rendering};
 	cycle <= end_of_line ? 9'd0 : cycle + 9'd1;
 	is_in_vblank <= new_is_in_vblank;
 end
@@ -617,7 +628,7 @@ end else if (ce) begin
 	overflow[1] <= overflow[0];
 	spr_overflow <= overflow[1];
 
-	if (scanline == 511 && cycle == 0) begin
+	if (is_vbe && cycle == 340) begin
 		overflow <= 0;
 		spr_overflow <= 0;
 	end
@@ -975,7 +986,8 @@ wire exiting_vblank;      // At the very last cycle of the vblank
 wire entering_vblank;     //
 wire is_pre_render_line;  // True while we're on the pre render scanline
 
-reg rendering_enabled;
+wire write_rendering = 0;//(write && ain == 1 && (din[3] | din[4]));
+wire rendering_enabled = (enable_objects | enable_playfield) || write_rendering;
 
 // 2C02 has an "is_vblank" flag that is true from pixel 0 of line 241 to pixel 0 of line 0;
 wire is_rendering = rendering_enabled && (scanline < 240 || is_pre_render_line);
@@ -1006,6 +1018,7 @@ wire [2:0] fine_x_scroll;
 LoopyGen loopy0(
 	.clk           (clk),
 	.ce            (ce),
+	.reset         (reset),
 	.is_rendering  (is_rendering),
 	.ain           (ain),
 	.din           (din),
@@ -1013,6 +1026,7 @@ LoopyGen loopy0(
 	.write         (write),
 	.is_pre_render (is_pre_render_line),
 	.cycle         (cycle),
+	.scanline      (scanline),
 	.loopy         (loopy),
 	.fine_x_scroll (fine_x_scroll)
 );
@@ -1134,10 +1148,16 @@ wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_obj_on_pixel ? obj_pixel_no
 
 reg sprite0_hit_bg;            // True if sprite#0 has collided with the BG in the last frame.
 reg sprite0_hit_latch;
-always @(posedge clk) if (ce) begin
-	rendering_enabled <= (enable_objects | enable_playfield);
+always @(posedge clk) if (reset) begin
+	// rendering_enabled <= 0;
+	// rendering_latch <= 0;
+	sprite0_hit_bg <= 0;
+	sprite0_hit_latch <= 0;
+end else if (ce) begin
+	// rendering_enabled <= rendering_latch;
+	// rendering_latch <= (enable_objects | enable_playfield);
 	sprite0_hit_bg <= sprite0_hit_latch;
-	if (cycle == 0 && scanline == 511) begin// confirmed with visual 2C02 (261, 1);
+	if (cycle == 240 && is_vbe_sl) begin// confirmed with visual 2C02 (261, 1);
 		sprite0_hit_bg <= 0;
 		sprite0_hit_latch <= 0;
 	end else if (

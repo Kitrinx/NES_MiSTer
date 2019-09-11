@@ -587,7 +587,7 @@ wire lightgun_en = |status[19:18];
 
 NES nes (
 	.clk             (clk),
-	.reset           (reset_nes),
+	.reset_nes       (reset_nes),
 	.sys_type        (status[24:23]),
 	.nes_div         (nes_ce),
 	.mapper_flags    (downloading ? 32'd0 : mapper_flags),

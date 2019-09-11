@@ -71,7 +71,7 @@ endmodule
 
 module NES(
 	input         clk,
-	input         reset,
+	input         reset_nes,
 	input   [1:0] sys_type,
 	output  [1:0] nes_div,
 	input  [31:0] mapper_flags,
@@ -199,7 +199,12 @@ reg [2:0] cpu_tick_count;
 
 wire skip_ppu_cycle = (cpu_tick_count == 4) && (ppu_tick == 0);
 
+reg hold_reset = 0;
+wire reset = reset_nes | hold_reset;
+
 always @(posedge clk) begin
+	if (reset_nes) hold_reset <= 1;
+	if (cpu_ce) hold_reset <= 0;
 	if (~freeze_clocks | ~(div_ppu == (div_ppu_n - 1'b1))) begin
 		if (~skip_ppu_cycle)
 			div_cpu <= cpu_ce || (ppu_ce && div_cpu > div_cpu_n) ? 5'd1 : div_cpu + 5'd1;
