@@ -88,9 +88,6 @@ always @(posedge clk) if (ce) begin
 		end
 		ppu_address_latch <= !ppu_address_latch;
 	end else if (write && ain == 6) begin
-		// latch_shift[0] <= ppu_address_latch;
-		// din_shift[0] <= din;
-		// write_shift[0] <= 1;
 		ppu_address_latch <= !ppu_address_latch;
 	end else if (read && ain == 2) begin
 		ppu_address_latch <= 0; //Reset PPU address latch
