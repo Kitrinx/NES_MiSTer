@@ -20,7 +20,7 @@ This is an FPGA implementation of the NES/Famicom based on [FPGANES](https://git
 Copy the NES_\*.rbf file to the root of the SD card. Create a **NES** folder on the root of the card, and place NES roms (\*.NES) inside this folder. The ROMs must have an iNES or NES2.0 header, which most already do. NES2.0 headers are prefered for the best accuracy. To have a game ROM load automatically upon starting the core and place it in the **NES** folder.
 - boot0.rom = FDS BIOS file.  Will be used for any FDS images loaded
 - boot1.rom = NES Cart file.  Can be used with boot0.rom (BIOS) in place
-- boot2.rom = FDS image file.  Requires boot0.rom (BIOS).  Use a blank FDS (header only) to boot the FDS BIOS without a disk image.
+- boot2.rom = Custom Palette file. This will set the custom palette option by default.
 - boot3.rom = NFS image file.  Can be used with boot0.rom (BIOS) in place
 
 ## Famicom Disk System Usage
