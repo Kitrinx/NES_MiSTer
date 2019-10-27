@@ -163,7 +163,8 @@ parameter CONF_STR2 = {
 	"O4,Hide Overscan,Off,On;",
 	"ORS,Mask Edges,Off,Left,Both,Auto;",
 	"OP,Extra Sprites,Off,On;",
-	"OCF,Palette,Smooth,Unsat.,FCEUX,NES Classic,Composite,PC-10,PVM,Wavebeam,Real,Sony CXA,YUV,Greyscale,Rockman9,Nintendulator;",
+	"OCF,Palette,Smooth,Unsat.,FCEUX,NES Classic,Composite,PC-10,PVM,Wavebeam,Real,Sony CXA,YUV,Greyscale,Rockman9,Ninten.,Custom;",
+	"H3F,PAL,Custom Palette;",
 	"-;",
 	"O9,Swap Joysticks,No,Yes;",
 	"OIJ,Peripheral,Powerpad,Zapper(Mouse),Zapper(Joy1),Zapper(Joy2);",
@@ -270,7 +271,7 @@ hps_io #(.STRLEN(($size(CONF_STR)>>3) + ($size(CONF_STR2)>>3) + 1)) hps_io
 	.joystick_analog_1(joy_analog1),
 
 	.status(status),
-	.status_menumask({~gg_avail, bios_loaded, ~bk_ena}),
+	.status_menumask({(palette2_osd != 4'd14), ~gg_avail, bios_loaded, ~bk_ena}),
 
 	.ioctl_download(ioctl_download),
 	.ioctl_addr(ioctl_addr),
@@ -514,7 +515,7 @@ wire       loader_clk;
 wire [21:0] loader_addr;
 wire [7:0] loader_write_data;
 reg  [7:0] old_filetype;
-wire loader_reset = !download_reset || ((old_filetype != filetype) && |filetype && ~type_gg); //loader_conf[0];
+wire loader_reset = !download_reset || ((old_filetype != filetype) && |filetype && ~type_gg && ~type_palette); //loader_conf[0];
 wire loader_write;
 wire [31:0] loader_flags;
 reg  [31:0] mapper_flags;
@@ -655,6 +656,8 @@ wire [7:0] bios_data;
 wire bios_write = (loader_write && bios_download && ~bios_loaded);
 reg bios_loaded = 0; // Only load bios once
 reg last_bios_download = 0;
+
+wire type_palette = filetype == 8'b00_001111; // filetype 0x0F?
 
 always @(posedge clk) begin
 	last_bios_download <= bios_download;
@@ -804,7 +807,7 @@ always @(posedge clk) begin
 		bk_pending <= 1'b0;
 end
 
-wire downloading = ioctl_download && ~type_gg;
+wire downloading = ioctl_download && ~type_gg && ~type_palette;
 wire type_gg = &filetype;
 ///////////////////////////////////////////////////
 
@@ -832,6 +835,41 @@ end
 end
 
 ///////////////////////////////////////////////////
+// palette loader
+reg [14:0] pal_color;
+reg [5:0] pal_index;
+reg pal_write;
+reg [1:0] pal_count;
+
+always @(posedge clk) begin
+	if (ioctl_download && loader_clk && type_palette && ioctl_addr < 192) begin
+		pal_count <= pal_count == 2 ? 2'd0 : pal_count + 2'd1;
+		case (pal_count)
+			0: begin 
+				pal_color[4:0] <= file_input[7:3];
+				pal_write <= 0;
+				pal_index <= ioctl_addr > 0 ? pal_index + 1'd1 : pal_index;
+			end
+
+			1: begin
+				pal_color[9:5] <= file_input[7:3];
+			end
+
+			2: begin
+				pal_color[14:10] <= file_input[7:3];
+				pal_write <= 1;
+			end
+		endcase
+	end
+
+	if (!ioctl_download) begin
+		pal_write <= 0;
+		pal_count <= 0;
+		pal_index <= 0;
+	end
+end
+
+///////////////////////////////////////////////////
 wire [2:0] scale = status[3:1];
 wire [2:0] sl = scale ? scale - 1'd1 : 3'd0;
 assign VGA_SL = sl[1:0];
@@ -853,6 +891,9 @@ video video
 	.scale(scale),
 	.hide_overscan(hide_overscan),
 	.palette(palette2_osd),
+	.load_color(pal_write && ioctl_download),
+	.load_color_data(pal_color),
+	.load_color_index(pal_index),
 	.emphasis(emphasis),
 	.reticle(displayp ? disksidepixel : ~status[22] ? reticle : 2'b00),
 	.pal_video(pal_video),
