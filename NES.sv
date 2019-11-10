@@ -208,7 +208,6 @@ wire int_audio = 1;
 reg type_bios, type_fds, type_gg, type_nsf, type_nes, type_palette, is_bios, downloading;
 
 always_ff @(posedge clk) begin
-	//downloading <= ioctl_downloading && (type_bios | type_fds | type_nes | type_nsf);
 	loader_reset <= !download_reset || ((old_filetype != filetype) && |filetype && ~type_gg && ~type_palette); //loader_conf[0];
 	ioctl_download <= ioctl_downloading;
 	{type_bios, type_fds, type_gg, type_nsf, type_nes, type_palette, is_bios, downloading} <= 0;
@@ -216,7 +215,7 @@ always_ff @(posedge clk) begin
 		case(filetype[7:6])
 			2'b00: begin type_bios <= 1; is_bios <= 1; downloading <= ioctl_downloading; end
 			2'b01: begin type_nes <= 1; downloading <= ioctl_downloading; end
-			2'b10: type_palette <= 1;
+			2'b10: begin type_fds <= 1; downloading <= ioctl_downloading; end
 			2'b11: begin type_nsf <= 1; downloading <= ioctl_downloading; end
 		endcase
 	else if(&filetype)
@@ -394,7 +393,7 @@ pll_cfg pll_cfg
 	.reconfig_from_pll(reconfig_from_pll)
 );
 
-always @(posedge CLK_50M) begin
+always @(posedge CLK_50M) begin : cfg_block
 	reg pald = 0, pald2 = 0;
 	reg [2:0] state = 0;
 
@@ -601,7 +600,7 @@ GameLoader loader
 );
 
 reg [24:0] rom_sz;
-always @(posedge clk) begin
+always @(posedge clk) begin : flags_block
 	reg done = 0;
 	
 	done <= loader_done;
@@ -612,7 +611,7 @@ always @(posedge clk) begin
 end
 
 reg led_blink;
-always @(posedge clk) begin
+always @(posedge clk) begin : blink_block
 	int cnt = 0;
 	cnt <= cnt + 1;
 	if(cnt == 10000000) begin
@@ -648,6 +647,8 @@ reg [1:0] diskside;
 
 wire lightgun_en = |status[19:18];
 
+wire gg_reset = (type_fds | type_gg | type_nes | type_nsf) && ioctl_download;
+
 NES nes (
 	.clk             (clk),
 	.reset_nes       (reset_nes),
@@ -656,7 +657,7 @@ NES nes (
 	.mapper_flags    (downloading ? 32'd0 : mapper_flags),
 	.gg              (status[20]),
 	.gg_code         (gg_code),
-	.gg_reset        (ioctl_download && loader_clk && !ioctl_addr),
+	.gg_reset        (gg_reset && loader_clk && !ioctl_addr),
 	.gg_avail        (gg_avail),
 	// Audio
 	.sample          (sample),
@@ -954,12 +955,13 @@ video video
 );
 
 reg ce_out;
-always @(posedge CLK_VIDEO) begin
-	reg old_clk;
-	
-	old_clk <= clk;
+always @(posedge CLK_VIDEO) begin : video_align
+	reg old_pix;
+	old_pix <= ce_pix;
 	ce_out <= 0;
-	if(old_clk & ~clk) ce_out <= ce_pix;
+
+	if (~old_pix & ce_pix)
+		ce_out <= 1;
 end
 
 assign CE_PIXEL = ce_out;
@@ -1034,7 +1036,7 @@ wire [1:0] next_btn_diskside = (last_diskside == diskside_btn) ? 2'd0 : diskside
 typedef enum bit [1:0] { S_IDLE, S_COPY } mystate;
 mystate bk_state = S_IDLE;
 
-always @(posedge clk) begin
+always @(posedge clk) begin : save_block
 	reg old_load = 0, old_save = 0, old_ack;
 	reg old_downloading = 0;
 	
@@ -1166,7 +1168,7 @@ wire is_dirty = !is_nes20 && ((ines[9][7:1] != 0)
 // Read the mapper number
 wire [7:0] mapper = {is_dirty ? 4'b0000 : ines[7][7:4], ines[6][7:4]};
 wire [7:0] ines2mapper = {is_nes20 ? ines[8] : 8'h00};
-wire [3:0] prgram = {is_nes20 ? ines[10][3:0] : 4'h00};
+wire [3:0] prgram = {is_nes20 ? ines[10][3:0] : 4'h0};
 wire       piano = is_nes20 && (ines[15][5:0] == 6'h19);
 wire has_saves = ines[6][1];
 
