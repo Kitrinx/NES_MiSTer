@@ -142,6 +142,7 @@ parameter CONF_STR = {
 	"-;",
 	"FS,NESFDSNSF;",
 	"H1F2,BIN,Load FDS BIOS;",
+	"F4,TAS,Load TAS file;",
 	"-;",
 	"ONO,System Type,NTSC,PAL,Dendy;",
 	"-;",
@@ -205,12 +206,12 @@ wire int_audio = 1;
 `endif
 
 // Figure out file types
-reg type_bios, type_fds, type_gg, type_nsf, type_nes, type_palette, is_bios, downloading;
+reg type_bios, type_fds, type_gg, type_nsf, type_nes, type_palette, type_tas, is_bios, downloading;
 
 always_ff @(posedge clk) begin
-	loader_reset <= !download_reset || ((old_filetype != filetype) && |filetype && ~type_gg && ~type_palette); //loader_conf[0];
+	loader_reset <= !download_reset || ((old_filetype != filetype) && |filetype && ~type_gg && ~type_palette && ~type_tas); //loader_conf[0];
 	ioctl_download <= ioctl_downloading;
-	{type_bios, type_fds, type_gg, type_nsf, type_nes, type_palette, is_bios, downloading} <= 0;
+	{type_bios, type_fds, type_gg, type_nsf, type_nes, type_palette, type_tas, is_bios, downloading} <= 0;
 	if (~|filetype[5:0])
 		case(filetype[7:6])
 			2'b00: begin type_bios <= 1; is_bios <= 1; downloading <= ioctl_downloading; end
@@ -220,17 +221,19 @@ always_ff @(posedge clk) begin
 		endcase
 	else if(&filetype)
 		type_gg <= 1;
-	else if (filetype[1:0] == 2'b01)
+	else if (filetype[2:0] == 3'b001)
 		case (filetype[7:6])
 			2'b00: begin type_nes <= 1; downloading <= ioctl_downloading; end
 			2'b01: begin type_fds <= 1; downloading <= ioctl_downloading; end
 			2'b10: begin type_nsf <= 1; downloading <= ioctl_downloading; end
 		endcase
-	else if (filetype[1:0] == 2'b10) begin
+	else if (filetype[2:0] == 3'b010) begin
 		type_bios <= 1;
 		downloading <= ioctl_downloading;
-	end else if (filetype[1:0] == 2'b11)
+	end else if (filetype[2:0] == 3'b011)
 		type_palette <= 1;
+	else if (filetype[2:0] == 3'b100)
+		type_tas <= 1;
 
 end
 
@@ -542,9 +545,17 @@ always @(posedge clk) begin
 		powerpad_d4 <= 0;
 		last_joypad_clock <= 0;
 	end else begin
+//	value <= my_array[i-1];
 		if (joypad_strobe) begin
+			// if (!first[0]) begin
+			// i <= i + 1;
+			// first[0] <= 1;
+			// end
+			
+//			joypad_bits  <= piano ? {15'h0000, uart_data[8:0]}
+//			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : value};
 			joypad_bits  <= piano ? {15'h0000, uart_data[8:0]}
-			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : nes_joy_A};
+			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : tas_active ? tas_key : nes_joy_A};
 			joypad_bits2 <= {status[10] ? {8'h04, nes_joy_D} : 16'hFFFF, joy_swap ? nes_joy_A : nes_joy_B};
 			powerpad_d4 <= {4'b0000, powerpad[7], powerpad[11], powerpad[2], powerpad[3]};
 			powerpad_d3 <= {powerpad[6], powerpad[10], powerpad[9], powerpad[5], powerpad[8], powerpad[4], powerpad[0], powerpad[1]};
@@ -558,8 +569,61 @@ always @(posedge clk) begin
 			powerpad_d3 <= {1'b0, powerpad_d3[7:1]};
 		end	
 		last_joypad_clock <= joypad_clock;
+		if (!joypad_strobe) begin
+		first[0] <= 0;
+		end
 	end
 end
+
+//////////////////////////////////////////
+
+reg [7:0] tas_key;
+reg [1:0] first;
+reg tas_active;
+reg tas_next;
+
+wire tas_downloading = ioctl_download && type_tas;
+integer tas_size;
+
+spram #(.addr_width(17)) tas
+(
+	.clock  (clk),
+	.address(tas_downloading ? ioctl_addr : tas_addr),
+	.data   (file_input),
+	.enable (1),
+	.wren   (tas_downloading ? loader_clk : 0),
+	.q      (tas_key)
+);
+
+reg old_v;
+wire [16:0] tas_addr = tas_count - 17'd1;
+reg [16:0] tas_count;
+always @(posedge clk) begin
+	old_v <= VGA_VS;
+
+	// if (|joyA && tas_active) // Cancel tas on button press
+	// 	tas_active <= 0;
+
+	if (VGA_VS && ~old_v)
+		tas_next <= 1;
+	
+	if (joypad_strobe && tas_next && ~reset_nes) begin
+		if(tas_addr < tas_size)
+			tas_count <= tas_count + 16'd1;
+		else if (~tas_downloading)
+			tas_active <= 0;
+
+		tas_next <= 0;
+	end
+		
+	if (tas_downloading) begin
+		tas_active <= 1;
+		tas_count <= 0;
+		tas_size <= ioctl_addr;
+	end
+end
+
+//////////////////////////////////////////
 
 // Loader
 wire [7:0] file_input;
@@ -629,6 +693,7 @@ wire reset_nes =
 	bk_loading     ||
 	bk_loading_req ||
 	hold_reset     ||
+	tas_downloading||
 	(old_sys_type != status[24:23]);
 
 reg [1:0] old_sys_type;
