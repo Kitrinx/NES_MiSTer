@@ -129,6 +129,7 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 
 `define DEBUG_AUDIO
+`define DEBUG_TAS
 
 // Status Bit Map:
 // 0         1         2         3 
@@ -142,7 +143,9 @@ parameter CONF_STR = {
 	"-;",
 	"FS,NESFDSNSF;",
 	"H1F2,BIN,Load FDS BIOS;",
+`ifdef DEBUG_TAS
 	"F4,TAS,Load TAS file;",
+`endif
 	"-;",
 	"ONO,System Type,NTSC,PAL,Dendy;",
 	"-;",
@@ -545,15 +548,7 @@ always @(posedge clk) begin
 		powerpad_d4 <= 0;
 		last_joypad_clock <= 0;
 	end else begin
-//	value <= my_array[i-1];
 		if (joypad_strobe) begin
-			// if (!first[0]) begin
-			// i <= i + 1;
-			// first[0] <= 1;
-			// end
-			
-//			joypad_bits  <= piano ? {15'h0000, uart_data[8:0]}
-//			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : value};
 			joypad_bits  <= piano ? {15'h0000, uart_data[8:0]}
 			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : tas_active ? tas_key : nes_joy_A};
 			joypad_bits2 <= {status[10] ? {8'h04, nes_joy_D} : 16'hFFFF, joy_swap ? nes_joy_A : nes_joy_B};
@@ -569,59 +564,76 @@ always @(posedge clk) begin
 			powerpad_d3 <= {1'b0, powerpad_d3[7:1]};
 		end	
 		last_joypad_clock <= joypad_clock;
-		if (!joypad_strobe) begin
-		first[0] <= 0;
-		end
 	end
 end
 
 //////////////////////////////////////////
 
 reg [7:0] tas_key;
-reg [1:0] first;
-reg tas_active;
-reg tas_next;
+reg tas_active = 0;
 
-wire tas_downloading = ioctl_download && type_tas;
+`ifdef DEBUG_TAS
+reg [17:0] tas_addr;
+reg tas_next;
+reg old_v;
 integer tas_size;
 
-spram #(.addr_width(17)) tas
+wire tas_downloading = ioctl_download && type_tas;
+//wire [17:0] tas_addr = tas_count - 17'd1;
+
+spram #(.addr_width(18)) tas
 (
 	.clock  (clk),
-	.address(tas_downloading ? ioctl_addr : tas_addr),
+	.address(tas_downloading ? ioctl_addr : tas_addr - 18'd1),
 	.data   (file_input),
 	.enable (1),
 	.wren   (tas_downloading ? loader_clk : 0),
 	.q      (tas_key)
 );
 
-reg old_v;
-wire [16:0] tas_addr = tas_count - 17'd1;
-reg [16:0] tas_count;
+reg tas_polled = 0;
+
+reg [8:0] old_scanline;
+reg old_strobe;
+
 always @(posedge clk) begin
-	old_v <= VGA_VS;
+	old_scanline <= scanline;
+	old_strobe <= joypad_strobe;
 
-	// if (|joyA && tas_active) // Cancel tas on button press
-	// 	tas_active <= 0;
+	if (|joyA && tas_active) // Cancel tas on button press
+		tas_active <= 0;
 
-	if (VGA_VS && ~old_v)
-		tas_next <= 1;
-	
-	if (joypad_strobe && tas_next && ~reset_nes) begin
-		if(tas_addr < tas_size)
-			tas_count <= tas_count + 16'd1;
+	if ((scanline == 239 && old_scanline != 239) && ~reset_nes) begin
+		if(tas_addr <= tas_size)
+			tas_addr <= tas_addr + 18'd1;
 		else if (~tas_downloading)
 			tas_active <= 0;
+		tas_next <= 0;
+	end
 
+	// 	tas_next <= 1;
+
+	// if (~old_strobe && joypad_strobe && ~reset_nes) begin
+	// 	if(tas_addr <= tas_size)
+	// 		tas_addr <= tas_addr + 18'd1;
+	// 	else if (~tas_downloading)
+	// 		tas_active <= 0;
+	// 	tas_next <= 0;
+	// end
+
+	if (reset_nes) begin
+		tas_addr <= 0;
+		tas_polled <=
 		tas_next <= 0;
 	end
 		
 	if (tas_downloading) begin
 		tas_active <= 1;
-		tas_count <= 0;
+		tas_addr <= 0;
 		tas_size <= ioctl_addr;
 	end
 end
+`endif
 
 //////////////////////////////////////////
 
