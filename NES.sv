@@ -144,7 +144,7 @@ parameter CONF_STR = {
 	"FS,NESFDSNSF;",
 	"H1F2,BIN,Load FDS BIOS;",
 `ifdef DEBUG_TAS
-	"F4,TAS,Load TAS file;",
+	"F4,r08,Load TAS file;",
 `endif
 	"-;",
 	"ONO,System Type,NTSC,PAL,Dendy;",
@@ -550,8 +550,8 @@ always @(posedge clk) begin
 	end else begin
 		if (joypad_strobe) begin
 			joypad_bits  <= piano ? {15'h0000, uart_data[8:0]}
-			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : tas_active ? tas_key : nes_joy_A};
-			joypad_bits2 <= {status[10] ? {8'h04, nes_joy_D} : 16'hFFFF, joy_swap ? nes_joy_A : nes_joy_B};
+			               : {status[10] ? {8'h08, nes_joy_C} : 16'hFFFF, joy_swap ? nes_joy_B : tas_active ? tas_key_r : nes_joy_A};
+			joypad_bits2 <= {status[10] ? {8'h04, nes_joy_D} : 16'hFFFF, joy_swap ? nes_joy_A : tas_active ? tas_key2_r : nes_joy_B};
 			powerpad_d4 <= {4'b0000, powerpad[7], powerpad[11], powerpad[2], powerpad[3]};
 			powerpad_d3 <= {powerpad[6], powerpad[10], powerpad[9], powerpad[5], powerpad[8], powerpad[4], powerpad[0], powerpad[1]};
 		end
@@ -570,10 +570,14 @@ end
 //////////////////////////////////////////
 
 reg [7:0] tas_key;
+reg [7:0] tas_key2;
 reg tas_active = 0;
 
+wire [7:0] tas_key_r = {tas_key[0], tas_key[1], tas_key[2], tas_key[3], tas_key[4], tas_key[5], tas_key[6], tas_key[7]};
+wire [7:0] tas_key2_r = {tas_key2[0], tas_key2[1], tas_key2[2], tas_key2[3], tas_key2[4], tas_key2[5], tas_key2[6], tas_key2[7]};
+
 `ifdef DEBUG_TAS
-reg [17:0] tas_addr;
+reg [18:0] tas_addr;
 reg tas_next;
 reg old_v;
 integer tas_size;
@@ -581,14 +585,18 @@ integer tas_size;
 wire tas_downloading = ioctl_download && type_tas;
 //wire [17:0] tas_addr = tas_count - 17'd1;
 
-spram #(.addr_width(18)) tas
+dpram #(.widthad_a(19)) tas
 (
-	.clock  (clk),
-	.address(tas_downloading ? ioctl_addr : tas_addr - 18'd1),
-	.data   (file_input),
-	.enable (1),
-	.wren   (tas_downloading ? loader_clk : 0),
-	.q      (tas_key)
+	.clock_a  (clk),
+	.address_a(tas_downloading ? ioctl_addr : tas_addr - 18'd2),
+	.data_a   (file_input),
+	.wren_a   (tas_downloading ? loader_clk : 0),
+	.q_a      (tas_key),
+
+	.clock_b  (clk),
+	.address_b(tas_addr - 18'd1),
+	.wren_b   (0),
+	.q_b      (tas_key2)
 );
 
 reg tas_polled = 0;
@@ -603,27 +611,25 @@ always @(posedge clk) begin
 	if (|joyA && tas_active) // Cancel tas on button press
 		tas_active <= 0;
 
-	if ((scanline == 239 && old_scanline != 239) && ~reset_nes) begin
-		if(tas_addr <= tas_size)
-			tas_addr <= tas_addr + 18'd1;
-		else if (~tas_downloading)
+	if (scanline == 200)
+		tas_polled <= 0;
+
+		tas_next <= 1;
+
+	if (~old_strobe && joypad_strobe && ~reset_nes && ~tas_polled) begin
+		if(tas_addr <= tas_size) begin
+			tas_addr <= tas_addr + 18'd2;
+			tas_polled <= 1;
+		end else if (~tas_downloading) begin
 			tas_active <= 0;
+		end
+
 		tas_next <= 0;
 	end
 
-	// 	tas_next <= 1;
-
-	// if (~old_strobe && joypad_strobe && ~reset_nes) begin
-	// 	if(tas_addr <= tas_size)
-	// 		tas_addr <= tas_addr + 18'd1;
-	// 	else if (~tas_downloading)
-	// 		tas_active <= 0;
-	// 	tas_next <= 0;
-	// end
-
 	if (reset_nes) begin
 		tas_addr <= 0;
-		tas_polled <=
+		tas_polled <= 0;
 		tas_next <= 0;
 	end
 		
