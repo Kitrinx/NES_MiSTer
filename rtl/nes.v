@@ -136,20 +136,20 @@ module NES(
 // PPU ---P---P---P---P---P---P---P---P---P---P---P---P
 //  M: M2 Tick, C: CPU Tick, P: PPU Tick -: Idle Cycle
 //
-// On Mister, we must pre-fetch data from memory 4 cycles before it is needed. 
+// On Mister, we must pre-fetch data from memory 4 cycles before it is needed.
 // Memory requests are aligned to the PPU clock and there are two types: CPU pre-fetch
 // and PPU pre-fetch. The CPU pre-fetch needs to be completed before the end of the CPU cycle, and
-// the PPU pre-fetch needs to be completed before each PPU CE is ticked. 
+// the PPU pre-fetch needs to be completed before each PPU CE is ticked.
 // The PPU_CE that acknowledges reads and writes always occurs after the M2 rising edge, and cart/mapper
 // CE's are always triggered on the rising edge of M2, which means that PPU will always see
 // any changes made by the cart mappers. Because the mapper on MiSTer is capable of changing the data that
 // is given to the CPU (banking, etc) the best time to run it is the first PPU cycle where the data from the
 // CPU is visible on the bus.
 //
-// The obvious issue is that the CPU and PPU pre-fetches will collide. Fortunately, because Nintendo 
+// The obvious issue is that the CPU and PPU pre-fetches will collide. Fortunately, because Nintendo
 // wanted to save pins, the ppu has to take two PPU ticks for every read, meaning there will always be
 // a minimum of one free PPU cycle in which to fit the CPU read. This does however create the issue that
-// we always need perfect alignment. 
+// we always need perfect alignment.
 //
 // Therefore, we can dervive the following order of operations:
 // - CPU pre-fetch should happen during first free PPU tick in a CPU cycle.
@@ -168,7 +168,7 @@ reg odd_or_even = 0; // 1 == odd, 0 == even
 
 // Clock Dividers
 localparam div_cpu_n = 5'd12;
-localparam div_ppu_n = 3'd4; 
+localparam div_ppu_n = 3'd4;
 
 // Counters
 reg [4:0] div_cpu = 5'd1;
@@ -184,6 +184,8 @@ wire cart_ce = (cart_pre & ppu_ce); // First PPU cycle where cpu data is visible
 wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 wire ppu_read  = (ppu_tick == (cpu_tick_count[2] ? 2 : 1));
 wire ppu_write = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
+
+wire phi2 = (div_cpu > 5 && div_cpu < div_cpu_n);
 
 // The infamous NES jitter is important for accuracy, but wreks havok on modern devices and scalers,
 // so what I do here is pause the whole system for one PPU clock and insert a "fake" ppu clock to
@@ -224,10 +226,10 @@ always @(posedge clk) begin
 	// Add one extra PPU tick every 5 cpu cycles for PAL.
 	if (cpu_ce && sys_type[0])
 		cpu_tick_count <= cpu_tick_count[2] ? 3'd0 : cpu_tick_count + 1'b1;
-	
+
 	// SDRAM Clock
 	div_sys <= div_sys + 1'b1;
-	
+
 	// De-Jitter shenanigans
 	if (faux_pixel_cnt == 3)
 		freeze_clocks <= 1'b0;
@@ -242,7 +244,7 @@ always @(posedge clk) begin
 
 	if (reset)
 		odd_or_even <= 1'b0;
-	else if (cpu_ce) 
+	else if (cpu_ce)
 		odd_or_even <= ~odd_or_even;
 
 	// Realign if the system type changes.
@@ -333,14 +335,15 @@ wire [15:0] sample_apu;
 APU apu(
 	.MMC5           (1'b0),
 	.clk            (clk),
+	.PHI2           (phi2),
+	.CS             (apu_cs),
 	.PAL            (sys_type[0]),
-	.ce             (cpu_ce),
+	.ce             (apu_ce),
 	.reset          (reset),
 	.ADDR           (addr[4:0]),
+	.RW             (cpu_rnw),
 	.DIN            (dbus),
 	.DOUT           (apu_dout),
-	.MW             (mw_int && apu_cs),
-	.MR             (mr_int && apu_cs),
 	.audio_channels (audio_channels),
 	.Sample         (sample_apu),
 	.DmaReq         (apu_dma_request),
