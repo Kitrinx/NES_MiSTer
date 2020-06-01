@@ -72,6 +72,7 @@ endmodule
 module NES(
 	input         clk,
 	input         reset_nes,
+	input         cold_reset,
 	input   [1:0] sys_type,
 	output  [1:0] nes_div,
 	input  [31:0] mapper_flags,
@@ -164,7 +165,7 @@ wire [7:0] cpu_dout;
 
 // odd or even apu cycle, AKA div_apu or apu_/clk2. This is actually not 50% duty cycle. It is high for 18
 // master cycles and low for 6 master cycles. It is considered active when low or "even".
-reg odd_or_even = 0; // 1 == odd, 0 == even
+reg odd_or_even = 1; // 1 == odd, 0 == even
 
 // Clock Dividers
 localparam div_cpu_n = 5'd12;
@@ -205,7 +206,9 @@ reg [2:0] cpu_tick_count;
 wire skip_ppu_cycle = (cpu_tick_count == 4) && (ppu_tick == 0);
 
 reg hold_reset = 0;
-wire reset = reset_nes | hold_reset;
+reg bootvector_flag;
+wire cpu_reset = reset_nes | hold_reset;
+wire reset = cpu_reset | bootvector_flag;
 
 always @(posedge clk) begin
 	if (reset_nes) hold_reset <= 1;
@@ -242,10 +245,14 @@ always @(posedge clk) begin
 		faux_pixel_cnt <= {div_ppu_n - 1'b1, 1'b0} + 1'b1;
 	end
 
-	if (reset)
-		odd_or_even <= 1'b0;
-	else if (cpu_ce)
+
+	if (cpu_reset) begin
+		bootvector_flag <= 1;
+		odd_or_even <= 1;
+	end else if (cpu_ce) begin
 		odd_or_even <= ~odd_or_even;
+		bootvector_flag <= 0;
+	end
 
 	// Realign if the system type changes.
 	last_sys_type <= sys_type;
@@ -277,7 +284,7 @@ T65 cpu(
 	.mode   (0),
 	.BCD_en (0),
 
-	.res_n  (~reset),
+	.res_n  (~cpu_reset),
 	.clk    (clk),
 	.enable (cpu_ce),
 	.rdy    (~pause_cpu),
@@ -340,6 +347,7 @@ APU apu(
 	.PAL            (sys_type[0]),
 	.ce             (apu_ce),
 	.reset          (reset),
+	.cold_reset     (cold_reset),
 	.ADDR           (addr[4:0]),
 	.RW             (cpu_rnw),
 	.DIN            (dbus),
