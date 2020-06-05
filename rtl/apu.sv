@@ -1,26 +1,5 @@
-// Copyright (c) 2012-2013 Ludvig Strigeus
-// This program is GPL Licensed. See COPYING for the full license.
-
-module DelayWrite (
-	input logic clk,
-	input logic gate,
-	input logic reset,
-	input logic [WIDTH-1'd1:0] din,
-	output logic [WIDTH-1'd1:0] dout
-);
-	parameter WIDTH = 8;
-
-	logic [WIDTH-1'd1:0] din_latch;
-
-	always_ff @(posedge clk)
-		if (reset)
-			din_latch <= 0;
-		else if (gate)
-			din_latch <= din;
-
-	assign dout = gate ? din : din_latch;
-
-endmodule
+// Rewritten 6/4/2020 by Kitrinx
+// This code is GPLv3.
 
 module LenCounterUnit (
 	input  logic       clk,
@@ -28,74 +7,55 @@ module LenCounterUnit (
 	input  logic       cold_reset,
 	input  logic       len_clk,
 	input  logic       aclk1,
-	input  logic [4:0] load_value,
+	input  logic       aclk1_d,
+	input  logic [7:0] load_value,
 	input  logic       halt_in,
 	input  logic       addr,
 	input  logic       is_triangle,
 	input  logic       write,
 	input  logic       enabled,
-	output logic [7:0] length_counter
+	output logic       lc_on
 );
 
-	logic [6:0] len_counter_lut[32];
-	assign len_counter_lut = '{
-		7'h05, 7'h7F, 7'h0A, 7'h01,
-		7'h14, 7'h02, 7'h28, 7'h03,
-		7'h50, 7'h04, 7'h1E, 7'h05,
-		7'h07, 7'h06, 7'h0D, 7'h07,
-		7'h06, 7'h08, 7'h0C, 7'h09,
-		7'h18, 7'h0A, 7'h30, 7'h0B,
-		7'h60, 7'h0C, 7'h24, 7'h0D,
-		7'h08, 7'h0E, 7'h10, 7'h0F
-	};
-
-	logic [7:0] len_counter_int;
-
-	assign length_counter = enabled ? len_counter_int : 7'd0;
-
 	always_ff @(posedge clk) begin : lenunit
-		logic halt, halt_next, halt_reload;
+		logic [7:0] len_counter_int;
+		logic halt, halt_next;
 		logic [7:0] len_counter_next;
-		logic len_reload;
+		logic lc_on_1;
+		logic clear_next;
+
+		if (aclk1_d)
+			if (~enabled)
+				lc_on <= 0;
 
 		if (aclk1) begin
-			if (len_reload) len_counter_int <= len_counter_next;
-			if (halt_reload) halt <= halt_next;
-
-			halt_reload <= 0;
-			len_reload <= 0;
+			lc_on_1 <= lc_on;
+			len_counter_next <= halt || ~|len_counter_int ? len_counter_int : len_counter_int - 1'd1;
+			clear_next <= ~halt && ~|len_counter_int;
 		end
 
 		if (write) begin
 			if (~addr) begin
-				halt_reload <= 1;
-				halt_next <= halt_in;
-			end else if (enabled) begin
-				len_reload <= 1;
-				len_counter_next <= {len_counter_lut[load_value], 1'b0};
+				halt <= halt_in;
+			end else begin
+				lc_on <= 1;
+				len_counter_int <= load_value;
 			end
 		end
 
 		// This deliberately can overwrite being loaded from writes
-		if (len_clk && enabled && |len_counter_int && ~halt) begin
-			len_reload <= 0;
-			len_counter_int <= len_counter_int - 1'd1;
-		end
-
-		if (~enabled) begin
-			len_counter_int <= 0;
-			len_counter_next <= 0;
-			len_reload <= 0;
+		if (len_clk && lc_on_1) begin
+			len_counter_int <= halt ? len_counter_int : len_counter_next;
+			if (clear_next)
+				lc_on <= 0;
 		end
 
 		if (reset) begin
 			if (~is_triangle || cold_reset) begin
 				halt <= 0;
-				halt_next <= 0;
-				halt_reload <= 0;
 			end
+			lc_on <= 0;
 			len_counter_int <= 0;
-			len_reload <= 0;
 			len_counter_next <= 0;
 		end
 	end
@@ -159,12 +119,15 @@ module SquareChan (
 	input  logic       clk,
 	input  logic       ce,
 	input  logic       aclk1,
+	input  logic       aclk1_d,
 	input  logic       reset,
 	input  logic       cold_reset,
+	input  logic       allow_us,
 	input  logic       sq2,
 	input  logic [1:0] Addr,
 	input  logic [7:0] DIN,
 	input  logic       write,
+	input  logic [7:0] lc_load,
 	input  logic       LenCtr_Clock,
 	input  logic       Env_Clock,
 	input  logic       odd_or_even,
@@ -190,31 +153,34 @@ module SquareChan (
 	logic ValidFreq;
 	logic subunit_write;
 	logic [3:0] Envelope;
-	logic [7:0] LenCtr;
+	logic lc;
+	logic DutyEnabledUsed;
+	logic DutyEnabled;
 
+	assign DutyEnabledUsed = MMC5 ^ DutyEnabled;
 	assign ShiftedPeriod = (Period >> SweepShift);
 	assign PeriodRhs = (SweepNegate ? (~ShiftedPeriod + {10'b0, sq2}) : ShiftedPeriod);
 	assign NewSweepPeriod = Period + PeriodRhs;
 	assign subunit_write = (Addr == 0 || Addr == 3) & write;
-	assign IsNonZero = (LenCtr != 0);
+	assign IsNonZero = lc;
 
-	// NOTE: This should be always be enabled for MMC5, but do we really want ultrasonic frequencies?
-	assign ValidFreq = /*(MMC5==1) ||*/ ((|Period[10:3]) && (SweepNegate || !NewSweepPeriod[11]));
-	assign Sample = (~|LenCtr | ~ValidFreq | ~DutyEnabledUsed | ~|TimerCtr[2:0]) ? 4'd0 : Envelope;
+	assign ValidFreq = (MMC5 && allow_us) || ((|Period[10:3]) && (SweepNegate || ~NewSweepPeriod[11]));
+	assign Sample = (~lc | ~ValidFreq | ~DutyEnabledUsed) ? 4'd0 : Envelope;
 
 	LenCounterUnit LenSq (
 		.clk            (clk),
 		.reset          (reset),
 		.cold_reset     (cold_reset),
 		.aclk1          (aclk1),
+		.aclk1_d        (aclk1_d),
 		.len_clk        (MMC5 ? Env_Clock : LenCtr_Clock),
-		.load_value     (DIN[7:3]),
+		.load_value     (lc_load),
 		.halt_in        (DIN[5]),
 		.addr           (Addr[0]),
 		.is_triangle    (1'b0),
 		.write          (subunit_write),
 		.enabled        (Enabled),
-		.length_counter (LenCtr)
+		.lc_on          (lc)
 	);
 
 	EnvelopeUnit EnvSq (
@@ -227,10 +193,24 @@ module SquareChan (
 		.envelope       (Envelope)
 	);
 
-	always_ff @(posedge clk) begin
-		if (aclk1) begin
+	always_comb begin
+		// The wave forms nad barrel shifter are abstracted simply here
+		case (Duty)
+			0: DutyEnabled = (SeqPos == 7);
+			1: DutyEnabled = (SeqPos >= 6);
+			2: DutyEnabled = (SeqPos >= 4);
+			3: DutyEnabled = (SeqPos < 6);
+		endcase
+	end
+
+	always_ff @(posedge clk) begin : sqblock
+		// Unusual to APU design, the square timers are clocked overlapping two phi2. This
+		// means that writes can impact this operation as they happen, however because of the way
+		// the results are presented, we can simply delay it rather than adding complexity for
+		// the same results.
+
+		if (aclk1_d) begin
 			if (TimerCtr == 0) begin
-				// Timer was clocked
 				TimerCtr <= Period;
 				SeqPos <= SeqPos - 1'd1;
 			end else begin
@@ -260,7 +240,7 @@ module SquareChan (
 					SweepReset <= 1;
 				end
 				2: Period[7:0] <= DIN;
-				3:begin
+				3: begin
 					Period[10:8] <= DIN[2:0];
 					SeqPos <= 0;
 				end
@@ -281,74 +261,64 @@ module SquareChan (
 		end
 	end
 
-	logic DutyEnabledUsed;
-	assign DutyEnabledUsed = MMC5 ^ DutyEnabled;
-
-	logic DutyEnabled;
-	always_comb begin
-		// Determine if the duty is enabled or not
-		case (Duty)
-			0: DutyEnabled = (SeqPos == 7);
-			1: DutyEnabled = (SeqPos >= 6);
-			2: DutyEnabled = (SeqPos >= 4);
-			3: DutyEnabled = (SeqPos < 6);
-		endcase
-	end
-
 endmodule
 
 module TriangleChan (
 	input  logic       clk,
 	input  logic       phi1,
 	input  logic       aclk1,
+	input  logic       aclk1_d,
 	input  logic       reset,
 	input  logic       cold_reset,
+	input  logic       allow_us,
 	input  logic [1:0] Addr,
 	input  logic [7:0] DIN,
-	input  logic       MW,
+	input  logic       write,
+	input  logic [7:0] lc_load,
 	input  logic       LenCtr_Clock,
 	input  logic       LinCtr_Clock,
 	input  logic       Enabled,
 	output logic [3:0] Sample,
 	output logic       IsNonZero
 );
-	logic [10:0] Period, TimerCtr;
+	logic [10:0] Period, applied_period, TimerCtr;
 	logic [4:0] SeqPos;
-	logic [6:0] LinCtrPeriod, LinCtr;
+	logic [6:0] LinCtrPeriod, LinCtrPeriod_1, LinCtr;
 	logic LinCtrl, line_reload;
 	logic LinCtrZero;
+	logic lc;
 
-	logic [7:0] LenCtr;
 	logic LenCtrZero;
 	logic subunit_write;
 	logic [3:0] sample_latch;
-	logic line_reload_2;
-	logic line_control_2;
 
 	assign LinCtrZero = ~|LinCtr;
-	assign LenCtrZero = ~|LenCtr;
-	assign IsNonZero = ~LenCtrZero;
-	assign subunit_write = (Addr == 0 || Addr == 3) & MW;
+	assign IsNonZero = lc;
+	assign subunit_write = (Addr == 0 || Addr == 3) & write;
 
-	LenCounterUnit LenSq (
+	assign Sample = (applied_period > 1 || allow_us) ? (SeqPos[3:0] ^ {4{~SeqPos[4]}}) : sample_latch;
+
+	LenCounterUnit LenTri (
 		.clk            (clk),
 		.reset          (reset),
 		.cold_reset     (cold_reset),
 		.aclk1          (aclk1),
+		.aclk1_d        (aclk1_d),
 		.len_clk        (LenCtr_Clock),
-		.load_value     (DIN[7:3]),
+		.load_value     (lc_load),
 		.halt_in        (DIN[7]),
 		.addr           (Addr[0]),
 		.is_triangle    (1'b1),
 		.write          (subunit_write),
 		.enabled        (Enabled),
-		.length_counter (LenCtr)
+		.lc_on          (lc)
 	);
 
 	always_ff @(posedge clk) begin
 		if (phi1) begin
 			if (TimerCtr == 0) begin
 				TimerCtr <= Period;
+				applied_period <= Period;
 				if (IsNonZero & ~LinCtrZero)
 					SeqPos <= SeqPos + 1'd1;
 			end else begin
@@ -356,22 +326,21 @@ module TriangleChan (
 			end
 		end
 
+		if (aclk1) begin
+			LinCtrPeriod_1 <= LinCtrPeriod;
+		end
+
 		if (LinCtr_Clock) begin
-			if (line_reload_2)
-				LinCtr <= LinCtrPeriod;
+			if (line_reload)
+				LinCtr <= LinCtrPeriod_1;
 			else if (!LinCtrZero)
 				LinCtr <= LinCtr - 1'd1;
 
-			if (!line_control_2)
+			if (!LinCtrl)
 				line_reload <= 0;
 		end
 
-		if (aclk1) begin
-			line_reload_2 <= line_reload;
-			line_control_2 <= LinCtrl;
-		end
-
-		if (MW) begin
+		if (write) begin
 			case (Addr)
 				0: begin
 					LinCtrl <= DIN[7];
@@ -398,12 +367,8 @@ module TriangleChan (
 			line_reload <= 0;
 		end
 
-		if (Period > 1) sample_latch <= Sample;
+		if (applied_period > 1) sample_latch <= Sample;
 	end
-
-	// XXX: Ultrisonic frequencies cause issues, so are disabled.
-	// This can be removed for accuracy if a proper LPF is ever implemented.
-	assign Sample = (Period > 1) ? SeqPos[3:0] ^ {4{~SeqPos[4]}} : sample_latch;
 
 endmodule
 
@@ -417,7 +382,8 @@ module NoiseChan (
 	input  logic [1:0] Addr,
 	input  logic [7:0] DIN,
 	input  logic       PAL,
-	input  logic       MW,
+	input  logic       write,
+	input  logic [7:0] lc_load,
 	input  logic       LenCtr_Clock,
 	input  logic       Env_Clock,
 	input  logic       Enabled,
@@ -428,32 +394,33 @@ module NoiseChan (
 	logic [14:0] Shift;
 	logic [3:0] Period;
 	logic [11:0] NoisePeriod, TimerCtr;
-	logic [7:0] LenCtr;
 	logic [3:0] Envelope;
 	logic subunit_write;
+	logic lc;
 
-	assign IsNonZero = (LenCtr != 0);
-	assign subunit_write = (Addr == 0 || Addr == 3) & MW;
+	assign IsNonZero = lc;
+	assign subunit_write = (Addr == 0 || Addr == 3) & write;
 
 	// Produce the output signal
-	assign Sample = (~|LenCtr || Shift[14]) ? 4'd0 : Envelope;
+	assign Sample = (~lc || Shift[14]) ? 4'd0 : Envelope;
 
-	LenCounterUnit LenSq (
+	LenCounterUnit LenNoi (
 		.clk            (clk),
 		.reset          (reset),
 		.cold_reset     (cold_reset),
 		.aclk1          (aclk1),
+		.aclk1_d        (aclk1_d),
 		.len_clk        (LenCtr_Clock),
-		.load_value     (DIN[7:3]),
+		.load_value     (lc_load),
 		.halt_in        (DIN[5]),
 		.addr           (Addr[0]),
 		.is_triangle    (1'b0),
 		.write          (subunit_write),
 		.enabled        (Enabled),
-		.length_counter (LenCtr)
+		.lc_on          (lc)
 	);
 
-	EnvelopeUnit EnvSq (
+	EnvelopeUnit EnvNoi (
 		.clk            (clk),
 		.reset          (reset),
 		.env_clk        (Env_Clock),
@@ -481,221 +448,49 @@ module NoiseChan (
 	};
 
 	logic [10:0] noise_timer;
+	logic noise_clock;
 	always_ff @(posedge clk) begin
-		// Things we know.
-		// They clock and reset together at aclk1_d
-		// The output of shift14 is gated by aclk1
-		// The output of shift10 is gated by aclk1
-		// The output of shift 14 is a put through a nor gate with itself and silence flags to final.
-
-		// These are reloaded with the next value at aclk1_d and the values are presented at aclk1
-		if (aclk1) begin
+		if (aclk1_d) begin
 			noise_timer <= {noise_timer[9:0], (noise_timer[10] ^ noise_timer[8]) | ~|noise_timer};
 
-			if (noise_timer == 'h400) begin
+			if (noise_clock) begin
+				noise_clock <= 0;
 				noise_timer <= PAL ? noise_pal_lut[Period] : noise_ntsc_lut[Period];
 				Shift <= {Shift[13:0], ((Shift[14] ^ (ShortMode ? Shift[8] : Shift[13])) | ~|Shift)};
 			end
 		end
 
-		if (MW && Addr == 2) begin
+		if (aclk1) begin
+			if (noise_timer == 'h400)
+				noise_clock <= 1;
+		end
+
+		if (write && Addr == 2) begin
 			ShortMode <= DIN[7];
 			Period <= DIN[3:0];
 		end
 
 		if (reset) begin
-			noise_timer <= cold_reset ? 11'd0 : (PAL ? noise_pal_lut[0] : noise_ntsc_lut[0]);
+			if (|noise_timer) noise_timer <= (PAL ? noise_pal_lut[0] : noise_ntsc_lut[0]);
 			ShortMode <= 0;
 			Shift <= 0;
 			Period <= 0;
 		end
+
+		if (cold_reset)
+			noise_timer <= 0;
 	end
 endmodule
 
 module DmcChan (
 	input  logic        MMC5,
 	input  logic        clk,
-	input  logic        ce,
-	input  logic        aclk1,
-	input  logic        reset,
-	input  logic        cold_reset,
-	input  logic        odd_or_even,
-	input  logic  [2:0] Addr,
-	input  logic  [7:0] DIN,
-	input  logic        MW,
-	input  logic        DmaAck,      // 1 when DMC byte is on DmcData. DmcDmaRequested should go low.
-	input  logic  [7:0] DmaData,     // Input data to DMC from memory.
-	input  logic        PAL,
-	output logic [15:0] DmaAddr,     // Address DMC wants to read
-	output logic        Irq,
-	output logic  [6:0] Sample,
-	output logic        DmaReq,      // 1 when DMC wants DMA
-	output logic        IsDmcActive
-);
-	logic IrqEnable;
-	logic IrqActive;
-	logic Loop;                 // Looping enabled
-	logic [3:0] Freq;           // Current value of frequency register
-	logic [7:0] Dac;        // Current value of DAC
-	logic [14:0] SampleAddress;  // Base address of sample
-	logic [7:0] SampleLen;      // Length of sample
-	logic [7:0] ShiftReg;       // Shift register
-	logic [8:0] Cycles;         // Down counter, is the period
-	logic [14:0] Address;        // 15 bits current address, 0x8000-0xffff
-	logic [11:0] BytesLeft;      // 12 bits bytes left counter 0 - 4081.
-	logic [2:0] BitsUsed;        // Number of bits left in the SampleBuffer.
-	logic [7:0] SampleBuffer;    // Next value to be loaded into shift reg
-	logic HasSampleBuffer;       // Sample buffer is nonempty
-	logic HasShiftReg;           // Shift reg is non empty
-	logic DmcEnabled;
-	logic [1:0] ActivationDelay;
-
-	assign DmaAddr = {1'b1, Address};
-	assign Sample = Dac[6:0];
-	assign Irq = IrqActive;
-	assign IsDmcActive = DmcEnabled;
-
-	assign DmaReq = !HasSampleBuffer && DmcEnabled && !ActivationDelay[0];
-
-	logic [8:0] NewPeriod[16];
-	assign NewPeriod = '{
-		9'd428, 9'd380, 9'd340, 9'd320,
-		9'd286, 9'd254, 9'd226, 9'd214,
-		9'd190, 9'd160, 9'd142, 9'd128,
-		9'd106, 9'd84,  9'd72,  9'd54
-	};
-
-	logic [8:0] NewPeriodPAL[16];
-	assign NewPeriodPAL = '{
-		9'd398, 9'd354, 9'd316, 9'd298,
-		9'd276, 9'd236, 9'd210, 9'd198,
-		9'd176, 9'd148, 9'd132, 9'd118,
-		9'd98,  9'd78,  9'd66,  9'd50
-	};
-
-	logic [7:0] dac_delay;
-	logic load_dac;
-
-	// Shift register initially loaded with 07
-	always_ff @(posedge clk) begin
-		if (MW) begin
-			case (Addr)
-			0: begin  // $4010 // Applies at aclk1.
-					IrqEnable <= DIN[7];
-					Loop <= DIN[6];
-					Freq <= DIN[3:0];
-					if (!DIN[7]) IrqActive <= 0;
-				end
-			1: begin  // $4011 Applies at aclk1
-					// This will get missed if the Dac <= far below runs, that is by design.
-					load_dac <= 1;
-					dac_delay <= {MMC5 & DIN[7], DIN[6:0]};
-				end
-			2: begin  // $4012 applies immediately
-					SampleAddress <= MMC5 ? 15'h00 : {1'b1, DIN[7:0], 6'b000000};
-				end
-			3: begin  // $4013 applies immediately
-					SampleLen <= (MMC5==1) ? 8'h0 : DIN[7:0];
-				end
-			5: begin // $4015 write	---D NT21  Enable DMC (D)
-					IrqActive <= 0; // Applies immediately
-					DmcEnabled <= DIN[4]; // Applies at aclk1
-					// If the DMC bit is set, the DMC sample will be restarted only if not already active.
-					if (~DIN[4])
-						BytesLeft <= 0;
-
-					if (DIN[4] && ~|BytesLeft) begin
-						Address <= SampleAddress;
-						BytesLeft <= {SampleLen, 4'b0000};
-						ActivationDelay <= 2'd3;
-					end
-				end
-			endcase
-		end
-
-		if (aclk1) begin
-			load_dac <= 0;
-			if (load_dac)
-				Dac <= dac_delay;
-		end
-
-		if (ce) begin
-			if (ActivationDelay == 3 && !odd_or_even) ActivationDelay <= 1; // aclk1_d
-			if (ActivationDelay == 1) ActivationDelay <= 0; // Aclk1
-
-			Cycles <= Cycles - 1'd1;
-			if (Cycles == 1) begin
-				Cycles <= PAL ? NewPeriodPAL[Freq] : NewPeriod[Freq];
-				if (HasShiftReg) begin
-					if (ShiftReg[0]) begin
-						Dac[6:1] <= (Dac[6:1] != 6'b111111) ? Dac[6:1] + 6'b000001 : Dac[6:1];
-					end else begin
-						Dac[6:1] <= (Dac[6:1] != 6'b000000) ? Dac[6:1] + 6'b111111 : Dac[6:1];
-					end
-				end
-				ShiftReg <= {1'b0, ShiftReg[7:1]};
-				BitsUsed <= BitsUsed + 1'd1;
-				if (BitsUsed == 7) begin
-					HasShiftReg <= HasSampleBuffer;
-					ShiftReg <= SampleBuffer;
-					HasSampleBuffer <= 0;
-				end
-			end
-
-			// Acknowledge DMA?
-			if (DmaAck) begin
-				Address <= Address + 1'd1;
-				BytesLeft <= BytesLeft - 1'd1;
-				HasSampleBuffer <= 1;
-				SampleBuffer <= DmaData;
-				if (BytesLeft == 0) begin
-					Address <= SampleAddress;
-					BytesLeft <= {SampleLen, 4'b0000};
-					DmcEnabled <= Loop;
-					if (!Loop && IrqEnable)
-						IrqActive <= 1;
-				end
-			end
-		end
-
-		if (reset) begin
-			IrqEnable <= 0;
-			IrqActive <= 0;
-			Loop <= 0;
-			Freq <= 0;
-			Dac <= 0;
-			ShiftReg <= 8'h0;
-			Cycles <= 439;
-			BytesLeft <= 0;
-			BitsUsed <= 0;
-			SampleBuffer <= 0;
-			HasSampleBuffer <= 0;
-			HasShiftReg <= 0;
-			DmcEnabled <= 0;
-			ActivationDelay <= 0;
-		end
-
-		if (cold_reset) begin
-			SampleAddress <= 15'h0000;
-			SampleLen <= 1;
-			Address <= 15'h0000;
-		end
-	end
-
-endmodule
-
-
-module DmcChan2 (
-	input  logic        MMC5,
-	input  logic        clk,
-	input  logic        phi1,
 	input  logic        aclk1,
 	input  logic        aclk1_d,
 	input  logic        reset,
 	input  logic        cold_reset,
 	input  logic  [2:0] ain,
 	input  logic  [7:0] DIN,
-	input  logic        write_ce,
 	input  logic        write,
 	input  logic        dma_ack,      // 1 when DMC byte is on DmcData. DmcDmaRequested should go low.
 	input  logic  [7:0] dma_data,     // Input data to DMC from memory.
@@ -709,7 +504,7 @@ module DmcChan2 (
 	logic irq_enable;
 	logic loop;                 // Looping enabled
 	logic [3:0] frequency;           // Current value of frequency register
-	logic [14:0] sample_address;  // Base address of sample
+	logic [7:0] sample_address;  // Base address of sample
 	logic [7:0] sample_length;      // Length of sample
 	logic [11:0] bytes_remaining;      // 12 bits bytes left counter 0 - 4081.
 	logic [7:0] sample_buffer;    // Next value to be loaded into shift reg
@@ -721,7 +516,6 @@ module DmcChan2 (
 	logic [7:0] sample_shift;
 	logic [2:0] dmc_bits; // Simply an 8 cycle counter.
 	logic enable_1, enable_2, enable_3;
-	logic do_adjust;
 
 	logic [8:0] pal_pitch_lut[16];
 	assign pal_pitch_lut = '{
@@ -739,41 +533,40 @@ module DmcChan2 (
 		9'h162, 9'h123, 9'h0E3, 9'h0D5
 	};
 
-	assign Sample = dmc_volume[6:0];
+	assign Sample = dmc_volume_next[6:0];
 	assign dma_req = ~have_buffer & enable & enable_3;
 	logic dmc_clock;
 
+	assign dma_address[15] = 1;
+
 	logic reload_next;
 	always_ff @(posedge clk) begin
-		if (write_ce) begin
+		if (write) begin
 			case (ain)
-			0: begin  // $4010 // Applies at aclk1.
-					irq_enable <= DIN[7];
-					loop <= DIN[6];
-					frequency <= DIN[3:0];
-					if (~DIN[7]) irq <= 0;
-				end
-			1: begin  // $4011 Applies immediately, can be overwritten before aclk1
-					dmc_volume <= {MMC5 & DIN[7], DIN[6:0]};
-				end
-			2: begin  // $4012 applies immediately
-					sample_address <= MMC5 ? 15'h00 : {1'b1, DIN[7:0], 6'b000000};
-				end
-			3: begin  // $4013 applies immediately
-					sample_length <= MMC5 ? 8'h0 : DIN[7:0];
-				end
-			5: begin // $4015
-					irq <= 0; // Applies immediately
-					enable <= DIN[4]; // Applies instantly -- there is a delayed version for DMC alignment
-					// If the DMC bit is set, the DMC sample will be restarted only if not already active.
-					if (~DIN[4])
-						bytes_remaining <= 0;
-
-					if (DIN[4] && ~|bytes_remaining) begin
-						dma_address <= {1'b1, sample_address};
-						bytes_remaining <= {sample_length, 4'b0000};
+				0: begin  // $4010
+						irq_enable <= DIN[7];
+						loop <= DIN[6];
+						frequency <= DIN[3:0];
+						if (~DIN[7]) irq <= 0;
 					end
-				end
+				1: begin  // $4011 Applies immediately, can be overwritten before aclk1
+						dmc_volume <= {MMC5 & DIN[7], DIN[6:0]};
+					end
+				2: begin  // $4012
+						sample_address <= MMC5 ? 8'h00 : DIN[7:0];
+					end
+				3: begin  // $4013
+						sample_length <= MMC5 ? 8'h00 : DIN[7:0];
+					end
+				5: begin // $4015
+						irq <= 0;
+						enable <= DIN[4];
+
+						if (DIN[4] && ~enable) begin
+							dma_address[14:0] <= {1'b1, sample_address[7:0], 6'h00};
+							bytes_remaining <= {sample_length, 4'h0};
+						end
+					end
 			endcase
 		end
 
@@ -788,34 +581,37 @@ module DmcChan2 (
 				sample_shift <= {1'b0, sample_shift[7:1]};
 				dmc_bits <= dmc_bits + 1'd1;
 
-				if (&dmc_bits) begin // FIXME: Verify that 7->0 is the reload not 0->1.
+				if (&dmc_bits) begin
 					dmc_silence <= ~have_buffer;
 					sample_shift <= sample_buffer;
 					have_buffer <= 0;
-					if (~dmc_silence) begin
-						if (~sample_shift[0]) begin
-							if (dmc_volume_next >= 2) begin
-								dmc_volume <= dmc_volume_next - 2'd2;
-							end
-						end else begin
-							if(dmc_volume_next <= 125) begin
-								dmc_volume <= dmc_volume_next + 2'd2;
-							end
-						end
+				end
+
+				if (~dmc_silence) begin
+					if (~sample_shift[0]) begin
+						if (|dmc_volume_next[6:1])
+							dmc_volume[6:1] <= dmc_volume_next[6:1] - 1'd1;
+					end else begin
+						if(~&dmc_volume_next[6:1])
+							dmc_volume[6:1] <= dmc_volume_next[6:1] + 1'd1;
 					end
 				end
 			end
 
+			// The data is technically clocked at phi2, but because of our implementation, to
+			// ensure the right data is latched, we do it on the falling edge of phi2.
 			if (dma_ack) begin
 				dma_address[14:0] <= dma_address[14:0] + 1'd1;
-				bytes_remaining <= bytes_remaining - 1'd1;
 				have_buffer <= 1;
 				sample_buffer <= dma_data;
-				if (bytes_remaining == 0) begin
-					dma_address <= {1'b1, sample_address};
-					bytes_remaining <= {sample_length, 4'b0000};
+
+				if (|bytes_remaining)
+					bytes_remaining <= bytes_remaining - 1'd1;
+				else begin
+					dma_address[14:0] <= {1'b1, sample_address[7:0], 6'h0};
+					bytes_remaining <= {sample_length, 4'h0};
 					enable <= loop;
-					if (~loop & irq_enable) // FIXME: Should be at previous phi2?
+					if (~loop & irq_enable)
 						irq <= 1;
 				end
 			end
@@ -835,13 +631,11 @@ module DmcChan2 (
 		end
 
 		if (reset) begin
-			irq_enable <= 0;
 			irq <= 0;
-			loop <= 0;
-			frequency <= 0;
-			dmc_volume <= 0;
+			dmc_volume <= {7'h0, dmc_volume[0]};
+			dmc_volume_next <= {7'h0, dmc_volume[0]};
 			sample_shift <= 8'h0;
-			dmc_lsfr <= cold_reset ? 9'd0 : (PAL ? pal_pitch_lut[0] : ntsc_pitch_lut[0]);
+			if (|dmc_lsfr) dmc_lsfr <= (PAL ? pal_pitch_lut[0] : ntsc_pitch_lut[0]);
 			bytes_remaining <= 0;
 			dmc_bits <= 0;
 			sample_buffer <= 0;
@@ -849,17 +643,22 @@ module DmcChan2 (
 			enable <= 0;
 			enable_1 <= 0;
 			enable_2 <= 0;
-			do_adjust <= 0;
+			enable_3 <= 0;
+			dma_address[14:0] <= 15'h0000;
 		end
 
 		if (cold_reset) begin
-			sample_address <= 15'h0000;
-			sample_length <= 1;
-			dma_address <= 16'h8000;
+			dmc_lsfr <= 0;
+			loop <= 0;
+			frequency <= 0;
+			irq_enable <= 0;
+			dmc_volume <= 0;
+			dmc_volume_next <= 0;
+			sample_address <= 0;
+			sample_length <= 0;
 		end
 
 	end
-
 
 endmodule
 
@@ -906,10 +705,6 @@ module FrameCtr (
 	logic FrameSeqMode_2;
 	logic frame_reset_2;
 	logic w4017_1, w4017_2;
-
-	// Proper state
-
-	// Frame counter LFSR
 	logic [14:0] frame;
 
 	// Register 4017
@@ -990,6 +785,7 @@ module APU (
 	input  logic        ce,
 	input  logic        reset,
 	input  logic        cold_reset,
+	input  logic        allow_us,       // Set to 1 to allow ultrasonic frequencies
 	input  logic        PAL,
 	input  logic  [4:0] ADDR,           // APU Address Line
 	input  logic  [7:0] DIN,            // Data to APU
@@ -1005,6 +801,21 @@ module APU (
 	output logic [15:0] DmaAddr,        // Address DMC wants to read
 	output logic        IRQ             // IRQ asserted high == asserted
 );
+
+	logic [7:0] len_counter_lut[32];
+	assign len_counter_lut = '{
+		8'h09, 8'hFD, 8'h13, 8'h01,
+		8'h27, 8'h03, 8'h4F, 8'h05,
+		8'h9F, 8'h07, 8'h3B, 8'h09,
+		8'h0D, 8'h0B, 8'h19, 8'h0D,
+		8'h0B, 8'h0F, 8'h17, 8'h11,
+		8'h2F, 8'h13, 8'h5F, 8'h15,
+		8'hBF, 8'h17, 8'h47, 8'h19,
+		8'h0F, 8'h1B, 8'h1F, 8'h1D
+	};
+
+	logic [7:0] lc_load;
+	assign lc_load = len_counter_lut[DIN[7:3]];
 
 	// APU reads and writes happen at Phi2 of the 6502 core. Note: Not M2.
 	logic read, read_old;
@@ -1023,7 +834,7 @@ module APU (
 	// write    -- Happens on CPU phi2 (Not M2!). Most of these are latched by one of the above clocks.
 	logic aclk1, aclk2, aclk1_delayed, phi1;
 	assign aclk1 = ce & odd_or_even;          // Defined as the cpu tick when the frame counter increases
-	assign aclk2 = phi2_ce;                   // Tick on odd cycles, not 50% duty cycle so it covers 2 cpu cycles
+	assign aclk2 = phi2_ce & ~odd_or_even;                   // Tick on odd cycles, not 50% duty cycle so it covers 2 cpu cycles
 	assign aclk1_delayed = ce & ~odd_or_even; // Ticks 1 cpu cycle after frame counter
 	assign phi1 = ce;
 
@@ -1058,7 +869,7 @@ module APU (
 			enabled_buffer_1 <= enabled_buffer;
 		end
 
-		if (ApuMW5 && write_ce && ADDR[1:0] == 1) begin
+		if (ApuMW5 && write && ADDR[1:0] == 1) begin
 			enabled_buffer <= DIN[4:0]; // Register $4015
 		end
 
@@ -1084,12 +895,15 @@ module APU (
 		.clk          (clk),
 		.ce           (ce),
 		.aclk1        (aclk1),
+		.aclk1_d      (aclk1_delayed),
 		.reset        (reset),
 		.cold_reset   (cold_reset),
+		.allow_us     (allow_us),
 		.sq2          (1'b0),
 		.Addr         (ADDR[1:0]),
 		.DIN          (DIN),
-		.write        (ApuMW0 && write_ce),
+		.write        (ApuMW0 && write),
+		.lc_load      (lc_load),
 		.LenCtr_Clock (ClkL),
 		.Env_Clock    (ClkE),
 		.odd_or_even  (odd_or_even),
@@ -1103,12 +917,14 @@ module APU (
 		.clk          (clk),
 		.ce           (ce),
 		.aclk1        (aclk1),
+		.aclk1_d      (aclk1_delayed),
 		.reset        (reset),
 		.cold_reset   (cold_reset),
 		.sq2          (1'b1),
 		.Addr         (ADDR[1:0]),
 		.DIN          (DIN),
-		.write        (ApuMW1 && write_ce),
+		.write        (ApuMW1 && write),
+		.lc_load      (lc_load),
 		.LenCtr_Clock (ClkL),
 		.Env_Clock    (ClkE),
 		.odd_or_even  (odd_or_even),
@@ -1121,11 +937,14 @@ module APU (
 		.clk          (clk),
 		.phi1         (phi1),
 		.aclk1        (aclk1),
+		.aclk1_d      (aclk1_delayed),
 		.reset        (reset),
 		.cold_reset   (cold_reset),
+		.allow_us     (allow_us),
 		.Addr         (ADDR[1:0]),
 		.DIN          (DIN),
-		.MW           (ApuMW2 && write_ce),
+		.write        (ApuMW2 && write),
+		.lc_load      (lc_load),
 		.LenCtr_Clock (ClkL),
 		.LinCtr_Clock (ClkE),
 		.Enabled      (Enabled[2]),
@@ -1143,7 +962,8 @@ module APU (
 		.Addr         (ADDR[1:0]),
 		.DIN          (DIN),
 		.PAL          (PAL),
-		.MW           (ApuMW3 && write_ce),
+		.write        (ApuMW3 && write),
+		.lc_load      (lc_load),
 		.LenCtr_Clock (ClkL),
 		.Env_Clock    (ClkE),
 		.Enabled      (Enabled[3]),
@@ -1151,38 +971,15 @@ module APU (
 		.IsNonZero    (NoiNonZero)
 	);
 
-	// DmcChan Dmc (
-	// 	.MMC5         (MMC5),
-	// 	.clk          (clk),
-	// 	.ce           (ce),
-	// 	.aclk1        (aclk1),
-	// 	.reset        (reset),
-	// 	.cold_reset   (cold_reset),
-	// 	.odd_or_even  (odd_or_even),
-	// 	.Addr         (ADDR[2:0]),
-	// 	.DIN          (DIN),
-	// 	.MW           (ApuMW4 && write_ce),
-	// 	.Sample       (DmcSample),
-	// 	.DmaReq       (DmaReq),
-	// 	.DmaAck       (DmaAck),
-	// 	.DmaAddr      (DmaAddr),
-	// 	.DmaData      (DmaData),
-	// 	.Irq          (DmcIrq),
-	// 	.PAL          (PAL),
-	// 	.IsDmcActive  (IsDmcActive)
-	// );
-
-	DmcChan2 Dmc (
+	DmcChan Dmc (
 		.MMC5        (MMC5),
 		.clk         (clk),
-		.phi1        (phi1),
 		.aclk1       (aclk1),
 		.aclk1_d     (aclk1_delayed),
 		.reset       (reset),
 		.cold_reset  (cold_reset),
 		.ain         (ADDR[2:0]),
 		.DIN         (DIN),
-		.write_ce    (write_ce & ApuMW4),
 		.write       (write & ApuMW4),
 		.dma_ack     (DmaAck),
 		.dma_data    (DmaData),
@@ -1226,8 +1023,9 @@ endmodule
 
 // http://wiki.nesdev.com/w/index.php/APU_Mixer
 // I generated three LUT's for each mix channel entry and one lut for the squares, then a
-// 282 entry lut for the mix channel. It's more accurate than the original LUT system listed on
-// the NesDev page.
+// 284 entry lut for the mix channel. It's more accurate than the original LUT system listed on
+// the NesDev page. In addition I boosted the square channel 10% and lowered the mix channel 10%
+// to more closely match real systems.
 
 module APUMixer (
 	input  logic  [3:0] square1,
@@ -1240,78 +1038,117 @@ module APUMixer (
 
 logic [15:0] pulse_lut[32];
 assign pulse_lut = '{
-	16'd0,     16'd763,   16'd1509,  16'd2236,  16'd2947,  16'd3641,  16'd4319,  16'd4982,
-	16'd5630,  16'd6264,  16'd6883,  16'd7490,  16'd8083,  16'd8664,  16'd9232,  16'd9789,
-	16'd10334, 16'd10868, 16'd11392, 16'd11905, 16'd12408, 16'd12901, 16'd13384, 16'd13858,
-	16'd14324, 16'd14780, 16'd15228, 16'd15668, 16'd16099, 16'd16523, 16'd16939, 16'd17348
+	16'h0000, 16'h0331, 16'h064F, 16'h0959, 16'h0C52, 16'h0F38, 16'h120E, 16'h14D3,
+	16'h1788, 16'h1A2E, 16'h1CC6, 16'h1F4E, 16'h21C9, 16'h2437, 16'h2697, 16'h28EB,
+	16'h2B32, 16'h2D6E, 16'h2F9E, 16'h31C3, 16'h33DD, 16'h35EC, 16'h37F2, 16'h39ED,
+	16'h3BDF, 16'h3DC7, 16'h3FA6, 16'h417D, 16'h434B, 16'h4510, 16'h46CD, 16'h0000
 };
 
 logic [5:0] tri_lut[16];
 assign tri_lut = '{
-	6'd0,  6'd3,  6'd7,  6'd11, 6'd15, 6'd19, 6'd23, 6'd27,
-	6'd31, 6'd35, 6'd39, 6'd43, 6'd47, 6'd51, 6'd55, 6'd59
+	6'h00, 6'h04, 6'h08, 6'h0C, 6'h10, 6'h14, 6'h18, 6'h1C,
+	6'h20, 6'h24, 6'h28, 6'h2C, 6'h30, 6'h34, 6'h38, 6'h3C
 };
 
 logic [5:0] noise_lut[16];
 assign noise_lut = '{
-	6'd0,  6'd2,  6'd5,  6'd8,  6'd10, 6'd13, 6'd16, 6'd18,
-	6'd21, 6'd24, 6'd26, 6'd29, 6'd32, 6'd34, 6'd37, 6'd40
+	6'h00, 6'h03, 6'h05, 6'h08, 6'h0B, 6'h0D, 6'h10, 6'h13,
+	6'h15, 6'h18, 6'h1B, 6'h1D, 6'h20, 6'h23, 6'h25, 6'h28
 };
 
 logic [7:0] dmc_lut[128];
 assign dmc_lut = '{
-	8'd0,   8'd1,   8'd2,   8'd4,   8'd5,   8'd7,   8'd8,   8'd10,  8'd11,  8'd13,  8'd14,  8'd15,  8'd17,  8'd18,  8'd20,  8'd21,
-	8'd23,  8'd24,  8'd26,  8'd27,  8'd28,  8'd30,  8'd31,  8'd33,  8'd34,  8'd36,  8'd37,  8'd39,  8'd40,  8'd41,  8'd43,  8'd44,
-	8'd46,  8'd47,  8'd49,  8'd50,  8'd52,  8'd53,  8'd55,  8'd56,  8'd57,  8'd59,  8'd60,  8'd62,  8'd63,  8'd65,  8'd66,  8'd68,
-	8'd69,  8'd70,  8'd72,  8'd73,  8'd75,  8'd76,  8'd78,  8'd79,  8'd81,  8'd82,  8'd83,  8'd85,  8'd86,  8'd88,  8'd89,  8'd91,
-	8'd92,  8'd94,  8'd95,  8'd96,  8'd98,  8'd99,  8'd101, 8'd102, 8'd104, 8'd105, 8'd107, 8'd108, 8'd110, 8'd111, 8'd112, 8'd114,
-	8'd115, 8'd117, 8'd118, 8'd120, 8'd121, 8'd123, 8'd124, 8'd125, 8'd127, 8'd128, 8'd130, 8'd131, 8'd133, 8'd134, 8'd136, 8'd137,
-	8'd138, 8'd140, 8'd141, 8'd143, 8'd144, 8'd146, 8'd147, 8'd149, 8'd150, 8'd151, 8'd153, 8'd154, 8'd156, 8'd157, 8'd159, 8'd160,
-	8'd162, 8'd163, 8'd165, 8'd166, 8'd167, 8'd169, 8'd170, 8'd172, 8'd173, 8'd175, 8'd176, 8'd178, 8'd179, 8'd180, 8'd182, 8'd183
+	8'h00, 8'h01, 8'h03, 8'h04, 8'h06, 8'h07, 8'h09, 8'h0A,
+	8'h0C, 8'h0D, 8'h0E, 8'h10, 8'h11, 8'h13, 8'h14, 8'h16,
+	8'h17, 8'h19, 8'h1A, 8'h1C, 8'h1D, 8'h1E, 8'h20, 8'h21,
+	8'h23, 8'h24, 8'h26, 8'h27, 8'h29, 8'h2A, 8'h2B, 8'h2D,
+	8'h2E, 8'h30, 8'h31, 8'h33, 8'h34, 8'h36, 8'h37, 8'h38,
+	8'h3A, 8'h3B, 8'h3D, 8'h3E, 8'h40, 8'h41, 8'h43, 8'h44,
+	8'h45, 8'h47, 8'h48, 8'h4A, 8'h4B, 8'h4D, 8'h4E, 8'h50,
+	8'h51, 8'h53, 8'h54, 8'h55, 8'h57, 8'h58, 8'h5A, 8'h5B,
+	8'h5D, 8'h5E, 8'h60, 8'h61, 8'h62, 8'h64, 8'h65, 8'h67,
+	8'h68, 8'h6A, 8'h6B, 8'h6D, 8'h6E, 8'h6F, 8'h71, 8'h72,
+	8'h74, 8'h75, 8'h77, 8'h78, 8'h7A, 8'h7B, 8'h7C, 8'h7E,
+	8'h7F, 8'h81, 8'h82, 8'h84, 8'h85, 8'h87, 8'h88, 8'h8A,
+	8'h8B, 8'h8C, 8'h8E, 8'h8F, 8'h91, 8'h92, 8'h94, 8'h95,
+	8'h97, 8'h98, 8'h99, 8'h9B, 8'h9C, 8'h9E, 8'h9F, 8'hA1,
+	8'hA2, 8'hA4, 8'hA5, 8'hA6, 8'hA8, 8'hA9, 8'hAB, 8'hAC,
+	8'hAE, 8'hAF, 8'hB1, 8'hB2, 8'hB3, 8'hB5, 8'hB6, 8'hB8
 };
 
 logic [15:0] mix_lut[512];
 assign mix_lut = '{
-	16'd0,     16'd318,   16'd635,   16'd950,   16'd1262,  16'd1573,  16'd1882,  16'd2190,  16'd2495,  16'd2799,  16'd3101,  16'd3401,  16'd3699,  16'd3995,  16'd4290,  16'd4583,
-	16'd4875,  16'd5164,  16'd5452,  16'd5739,  16'd6023,  16'd6306,  16'd6588,  16'd6868,  16'd7146,  16'd7423,  16'd7698,  16'd7971,  16'd8243,  16'd8514,  16'd8783,  16'd9050,
-	16'd9316,  16'd9581,  16'd9844,  16'd10105, 16'd10365, 16'd10624, 16'd10881, 16'd11137, 16'd11392, 16'd11645, 16'd11897, 16'd12147, 16'd12396, 16'd12644, 16'd12890, 16'd13135,
-	16'd13379, 16'd13622, 16'd13863, 16'd14103, 16'd14341, 16'd14579, 16'd14815, 16'd15050, 16'd15284, 16'd15516, 16'd15747, 16'd15978, 16'd16206, 16'd16434, 16'd16661, 16'd16886,
-	16'd17110, 16'd17333, 16'd17555, 16'd17776, 16'd17996, 16'd18215, 16'd18432, 16'd18649, 16'd18864, 16'd19078, 16'd19291, 16'd19504, 16'd19715, 16'd19925, 16'd20134, 16'd20342,
-	16'd20549, 16'd20755, 16'd20960, 16'd21163, 16'd21366, 16'd21568, 16'd21769, 16'd21969, 16'd22169, 16'd22367, 16'd22564, 16'd22760, 16'd22955, 16'd23150, 16'd23343, 16'd23536,
-	16'd23727, 16'd23918, 16'd24108, 16'd24297, 16'd24485, 16'd24672, 16'd24858, 16'd25044, 16'd25228, 16'd25412, 16'd25595, 16'd25777, 16'd25958, 16'd26138, 16'd26318, 16'd26497,
-	16'd26674, 16'd26852, 16'd27028, 16'd27203, 16'd27378, 16'd27552, 16'd27725, 16'd27898, 16'd28069, 16'd28240, 16'd28410, 16'd28579, 16'd28748, 16'd28916, 16'd29083, 16'd29249,
-	16'd29415, 16'd29580, 16'd29744, 16'd29907, 16'd30070, 16'd30232, 16'd30393, 16'd30554, 16'd30714, 16'd30873, 16'd31032, 16'd31190, 16'd31347, 16'd31503, 16'd31659, 16'd31815,
-	16'd31969, 16'd32123, 16'd32276, 16'd32429, 16'd32581, 16'd32732, 16'd32883, 16'd33033, 16'd33182, 16'd33331, 16'd33479, 16'd33627, 16'd33774, 16'd33920, 16'd34066, 16'd34211,
-	16'd34356, 16'd34500, 16'd34643, 16'd34786, 16'd34928, 16'd35070, 16'd35211, 16'd35352, 16'd35492, 16'd35631, 16'd35770, 16'd35908, 16'd36046, 16'd36183, 16'd36319, 16'd36456,
-	16'd36591, 16'd36726, 16'd36860, 16'd36994, 16'd37128, 16'd37261, 16'd37393, 16'd37525, 16'd37656, 16'd37787, 16'd37917, 16'd38047, 16'd38176, 16'd38305, 16'd38433, 16'd38561,
-	16'd38689, 16'd38815, 16'd38942, 16'd39068, 16'd39193, 16'd39318, 16'd39442, 16'd39566, 16'd39690, 16'd39813, 16'd39935, 16'd40057, 16'd40179, 16'd40300, 16'd40421, 16'd40541,
-	16'd40661, 16'd40780, 16'd40899, 16'd41017, 16'd41136, 16'd41253, 16'd41370, 16'd41487, 16'd41603, 16'd41719, 16'd41835, 16'd41950, 16'd42064, 16'd42178, 16'd42292, 16'd42406,
-	16'd42519, 16'd42631, 16'd42743, 16'd42855, 16'd42966, 16'd43077, 16'd43188, 16'd43298, 16'd43408, 16'd43517, 16'd43626, 16'd43735, 16'd43843, 16'd43951, 16'd44058, 16'd44165,
-	16'd44272, 16'd44378, 16'd44484, 16'd44589, 16'd44695, 16'd44799, 16'd44904, 16'd45008, 16'd45112, 16'd45215, 16'd45318, 16'd45421, 16'd45523, 16'd45625, 16'd45726, 16'd45828,
-	16'd45929, 16'd46029, 16'd46129, 16'd46229, 16'd46329, 16'd46428, 16'd46527, 16'd46625, 16'd46723, 16'd46821, 16'd46919, 16'd47016, 16'd47113, 16'd47209, 16'd47306, 16'd47402,
-	16'd47497, 16'd47592, 16'd47687, 16'd47782, 16'd47876, 16'd47970, 16'd48064, 16'd48157, 16'd48250, 16'd48343, 16'd48436, 16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,
-	16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0,     16'd0
+	16'h0000, 16'h0128, 16'h024F, 16'h0374, 16'h0497, 16'h05B8, 16'h06D7, 16'h07F5,
+	16'h0911, 16'h0A2B, 16'h0B44, 16'h0C5B, 16'h0D71, 16'h0E84, 16'h0F96, 16'h10A7,
+	16'h11B6, 16'h12C3, 16'h13CF, 16'h14DA, 16'h15E2, 16'h16EA, 16'h17EF, 16'h18F4,
+	16'h19F6, 16'h1AF8, 16'h1BF7, 16'h1CF6, 16'h1DF3, 16'h1EEE, 16'h1FE9, 16'h20E1,
+	16'h21D9, 16'h22CF, 16'h23C3, 16'h24B7, 16'h25A9, 16'h2699, 16'h2788, 16'h2876,
+	16'h2963, 16'h2A4F, 16'h2B39, 16'h2C22, 16'h2D09, 16'h2DF0, 16'h2ED5, 16'h2FB9,
+	16'h309B, 16'h317D, 16'h325D, 16'h333C, 16'h341A, 16'h34F7, 16'h35D3, 16'h36AD,
+	16'h3787, 16'h385F, 16'h3936, 16'h3A0C, 16'h3AE1, 16'h3BB5, 16'h3C87, 16'h3D59,
+	16'h3E29, 16'h3EF9, 16'h3FC7, 16'h4095, 16'h4161, 16'h422C, 16'h42F7, 16'h43C0,
+	16'h4488, 16'h4550, 16'h4616, 16'h46DB, 16'h47A0, 16'h4863, 16'h4925, 16'h49E7,
+	16'h4AA7, 16'h4B67, 16'h4C25, 16'h4CE3, 16'h4DA0, 16'h4E5C, 16'h4F17, 16'h4FD1,
+	16'h508A, 16'h5142, 16'h51F9, 16'h52B0, 16'h5365, 16'h541A, 16'h54CE, 16'h5581,
+	16'h5633, 16'h56E5, 16'h5795, 16'h5845, 16'h58F4, 16'h59A2, 16'h5A4F, 16'h5AFC,
+	16'h5BA7, 16'h5C52, 16'h5CFC, 16'h5DA5, 16'h5E4E, 16'h5EF6, 16'h5F9D, 16'h6043,
+	16'h60E8, 16'h618D, 16'h6231, 16'h62D4, 16'h6377, 16'h6418, 16'h64B9, 16'h655A,
+	16'h65F9, 16'h6698, 16'h6736, 16'h67D4, 16'h6871, 16'h690D, 16'h69A8, 16'h6A43,
+	16'h6ADD, 16'h6B76, 16'h6C0F, 16'h6CA7, 16'h6D3E, 16'h6DD5, 16'h6E6B, 16'h6F00,
+	16'h6F95, 16'h7029, 16'h70BD, 16'h7150, 16'h71E2, 16'h7273, 16'h7304, 16'h7395,
+	16'h7424, 16'h74B4, 16'h7542, 16'h75D0, 16'h765D, 16'h76EA, 16'h7776, 16'h7802,
+	16'h788D, 16'h7917, 16'h79A1, 16'h7A2A, 16'h7AB3, 16'h7B3B, 16'h7BC3, 16'h7C4A,
+	16'h7CD0, 16'h7D56, 16'h7DDB, 16'h7E60, 16'h7EE4, 16'h7F68, 16'h7FEB, 16'h806E,
+	16'h80F0, 16'h8172, 16'h81F3, 16'h8274, 16'h82F4, 16'h8373, 16'h83F2, 16'h8471,
+	16'h84EF, 16'h856C, 16'h85E9, 16'h8666, 16'h86E2, 16'h875E, 16'h87D9, 16'h8853,
+	16'h88CD, 16'h8947, 16'h89C0, 16'h8A39, 16'h8AB1, 16'h8B29, 16'h8BA0, 16'h8C17,
+	16'h8C8E, 16'h8D03, 16'h8D79, 16'h8DEE, 16'h8E63, 16'h8ED7, 16'h8F4A, 16'h8FBE,
+	16'h9030, 16'h90A3, 16'h9115, 16'h9186, 16'h91F7, 16'h9268, 16'h92D8, 16'h9348,
+	16'h93B8, 16'h9427, 16'h9495, 16'h9503, 16'h9571, 16'h95DF, 16'h964C, 16'h96B8,
+	16'h9724, 16'h9790, 16'h97FB, 16'h9866, 16'h98D1, 16'h993B, 16'h99A5, 16'h9A0E,
+	16'h9A77, 16'h9AE0, 16'h9B48, 16'h9BB0, 16'h9C18, 16'h9C7F, 16'h9CE6, 16'h9D4C,
+	16'h9DB2, 16'h9E18, 16'h9E7D, 16'h9EE2, 16'h9F47, 16'h9FAB, 16'hA00F, 16'hA073,
+	16'hA0D6, 16'hA139, 16'hA19B, 16'hA1FD, 16'hA25F, 16'hA2C1, 16'hA322, 16'hA383,
+	16'hA3E3, 16'hA443, 16'hA4A3, 16'hA502, 16'hA562, 16'hA5C0, 16'hA61F, 16'hA67D,
+	16'hA6DB, 16'hA738, 16'hA796, 16'hA7F2, 16'hA84F, 16'hA8AB, 16'hA907, 16'hA963,
+	16'hA9BE, 16'hAA19, 16'hAA74, 16'hAACE, 16'hAB28, 16'hAB82, 16'hABDB, 16'hAC35,
+	16'hAC8E, 16'hACE6, 16'hAD3E, 16'hAD96, 16'hADEE, 16'hAE46, 16'hAE9D, 16'hAEF4,
+	16'hAF4A, 16'hAFA0, 16'hAFF6, 16'hB04C, 16'hB0A2, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000,
+	16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000, 16'h0000
 };
 
 wire [4:0] squares = square1 + square2;
-wire [8:0] mix = tri_lut[triangle] + noise_lut[noise] + dmc_lut[dmc];
 wire [15:0] ch1 = pulse_lut[squares];
+wire [8:0] mix = tri_lut[triangle] + noise_lut[noise] + dmc_lut[dmc];
 wire [15:0] ch2 = mix_lut[mix];
-wire [63:0] chan_mix = ch1 + ch2;
 
-assign sample = chan_mix > 16'hFFFF ? 16'hFFFF : chan_mix[15:0];
+assign sample = ch1 + ch2;
 
 endmodule

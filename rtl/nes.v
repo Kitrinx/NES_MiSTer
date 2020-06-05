@@ -186,7 +186,7 @@ wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 wire ppu_read  = (ppu_tick == (cpu_tick_count[2] ? 2 : 1));
 wire ppu_write = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 
-wire phi2 = (div_cpu > 5 && div_cpu < div_cpu_n);
+wire phi2 = (div_cpu > 4 && div_cpu < div_cpu_n);
 
 // The infamous NES jitter is important for accuracy, but wreks havok on modern devices and scalers,
 // so what I do here is pause the whole system for one PPU clock and insert a "fake" ppu clock to
