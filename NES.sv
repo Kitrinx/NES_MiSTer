@@ -33,7 +33,7 @@ module emu
 	output        VGA_VS,
 	output        VGA_DE,    // = ~(VBlank | HBlank)
 	output        VGA_F1,
-	output  [1:0] VGA_SL,
+	output [1:0]  VGA_SL,
 
 	output        LED_USER,  // 1 - ON, 0 - OFF.
 
@@ -48,9 +48,10 @@ module emu
 	// b[0]: osd button
 	output  [1:0] BUTTONS,
 
+	input         CLK_AUDIO, // 24.576 MHz
 	output [15:0] AUDIO_L,
 	output [15:0] AUDIO_R,
-	output        AUDIO_S, // 1 - signed audio samples, 0 - unsigned
+	output        AUDIO_S,   // 1 - signed audio samples, 0 - unsigned
 	output  [1:0] AUDIO_MIX, // 0 - no mix, 1 - 25%, 2 - 50%, 3 - 100% (mono)
 
 	//ADC
@@ -107,10 +108,11 @@ module emu
 	input         OSD_STATUS
 );
 
+
 assign ADC_BUS  = 'Z;
 
-assign AUDIO_S   = 1'b1;
-assign AUDIO_L   = |mute_cnt ? 16'd0 : sample_signed[15:0];
+assign AUDIO_S   = 0;
+assign AUDIO_L   = sample;
 assign AUDIO_R   = AUDIO_L;
 assign AUDIO_MIX = 0;
 
@@ -263,13 +265,13 @@ end
 // Remove DC offset and convert to signed
 // At this CE rate, it also slightly lowers the bass to
 // better imitate the real high pass of the system.
-jt49_dcrm2 #(.sw(16)) dc_filter (
-	.clk  (clk),
-	.cen  (apu_ce & &filter_cnt),
-	.rst  (reset_nes),
-	.din  (sample),
-	.dout (sample_signed)
-);
+// jt49_dcrm2 #(.sw(16)) dc_filter (
+// 	.clk  (clk),
+// 	.cen  (apu_ce & &filter_cnt),
+// 	.rst  (reset_nes),
+// 	.din  (sample),
+// 	.dout (sample_signed)
+// );
 
 wire apu_ce;
 wire signed [15:0] sample_signed;

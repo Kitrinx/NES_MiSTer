@@ -226,7 +226,7 @@ reg [14:0] pixel;
 reg HBlank_r, VBlank_r;
 
 always @(posedge clk) begin
-	
+
 	if(pix_ce_n) begin
 		case (palette)
 			0: pixel <= pal_smooth_lut[color_ef][14:0];
@@ -246,7 +246,7 @@ always @(posedge clk) begin
 			14: pixel <= mem_data;
 			default:pixel <= pal_smooth_lut[color_ef][14:0];
 		endcase
-	
+
 		HBlank_r <= HBlank;
 		VBlank_r <= VBlank;
 	end
@@ -305,7 +305,7 @@ always @(posedge clk) begin
 			HBlank <= (hc >= HBL_START) && (hc <= HBL_END);                // 280 pixels
 			VBlank <= (vc >= VBL_START);                                   // 240 lines
 		end
-		
+
 		if(hc == 278) begin
 			HSync <= 1;
 			VSync <= ((vc >= vsync_start) && (vc < vsync_start+3));
@@ -328,14 +328,10 @@ reg dark_r, dark_g, dark_b;
 always @(posedge clk) if (pix_ce_n) begin
 	{dark_r, dark_g, dark_b} <= 3'b000;
 
-	if ((color_ef[3:0] < 4'hE) && |emphasis) begin
-		if (~&emphasis) begin
-			dark_r <= ~emphasis[0];
-			dark_g <= ~emphasis[1];
-			dark_b <= ~emphasis[2];
-		end else begin
-			{dark_r, dark_g, dark_b} <= 3'b111;
-		end
+	if (~&color_ef[3:1]) begin // Only applies in draw range
+		dark_r <= emphasis[1] | emphasis[2];
+		dark_g <= emphasis[0] | emphasis[2];
+		dark_b <= emphasis[0] | emphasis[1];
 	end
 end
 
@@ -349,7 +345,7 @@ video_mixer #(260, 0, 1) video_mixer
 	.clk_vid(clk),
 	.ce_pix(pix_ce),
 	.ce_pix_out(ce_pix),
-	
+
 	.HBlank(HBlank_r),
 	.VBlank(VBlank_r),
 

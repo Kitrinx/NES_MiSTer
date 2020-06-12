@@ -132,30 +132,12 @@ module NES(
 
 // Master clock speed: NTSC/Dendy: 21.477272, PAL: 21.2813696
 
-// Cyc 123456789ABC123456789ABC123456789ABC123456789ABC
-// CPU ----M------C----M------C----M------C----M------C
-// PPU ---P---P---P---P---P---P---P---P---P---P---P---P
-//  M: M2 Tick, C: CPU Tick, P: PPU Tick -: Idle Cycle
-//
-// On Mister, we must pre-fetch data from memory 4 cycles before it is needed.
-// Memory requests are aligned to the PPU clock and there are two types: CPU pre-fetch
-// and PPU pre-fetch. The CPU pre-fetch needs to be completed before the end of the CPU cycle, and
-// the PPU pre-fetch needs to be completed before each PPU CE is ticked.
-// The PPU_CE that acknowledges reads and writes always occurs after the M2 rising edge, and cart/mapper
-// CE's are always triggered on the rising edge of M2, which means that PPU will always see
-// any changes made by the cart mappers. Because the mapper on MiSTer is capable of changing the data that
-// is given to the CPU (banking, etc) the best time to run it is the first PPU cycle where the data from the
-// CPU is visible on the bus.
-//
-// The obvious issue is that the CPU and PPU pre-fetches will collide. Fortunately, because Nintendo
-// wanted to save pins, the ppu has to take two PPU ticks for every read, meaning there will always be
-// a minimum of one free PPU cycle in which to fit the CPU read. This does however create the issue that
-// we always need perfect alignment.
-//
-// Therefore, we can dervive the following order of operations:
-// - CPU pre-fetch should happen during first free PPU tick in a CPU cycle.
-// - Cart CE should happen on the second PPU tick in a CPU cycle always
-// - PPU read/write should happen on the last PPU tick in a CPU cycle (usually third)
+// Ph2 ____-------_____-------______------_____-------_
+// Cyc 0123456789ABC123456789ABC123456789ABC123456789ABC
+// CPU ----2------1----2------1----2------1----2------1    1 = Phi1,  2 = Phi2
+// PPU -1-0-1-0-1-0-1-0-1-0-1-0-1-0-1-0-1-0-1-0-1-0-1-0    0 = Pclk0, 1 = Pclk1
+// APU -----------1----2------D-----------1----2------D    1 = aclk1, 2 = aclk2, D = aclk1_d
+// - = Idle Master Cycle
 
 assign nes_div = div_sys;
 assign apu_ce = cpu_ce;
@@ -163,30 +145,38 @@ assign apu_ce = cpu_ce;
 wire [7:0] from_data_bus;
 wire [7:0] cpu_dout;
 
-// odd or even apu cycle, AKA div_apu or apu_/clk2. This is actually not 50% duty cycle. It is high for 18
-// master cycles and low for 6 master cycles. It is considered active when low or "even".
-reg odd_or_even = 1; // 1 == odd, 0 == even
+// APU cycle flag, used for APU clocks and DMA. This is actually not 50% duty cycle, but this is not
+// a significant fact in our implementation.
+reg odd_or_even = 0;
 
 // Clock Dividers
-localparam div_cpu_n = 5'd12;
-localparam div_ppu_n = 3'd4;
+localparam div_cpu_n = 4'd11;
+localparam div_ppu_n = 2'd3;
 
 // Counters
-reg [4:0] div_cpu = 5'd1;
-reg [2:0] div_ppu = 3'd1;
-reg [1:0] div_sys = 2'd0;
+reg [3:0] div_cpu = 4'd0;
+reg [1:0] div_ppu = 2'd0;
+reg [1:0] div_sys = 2'd3;
 
 // CE's
-wire cpu_ce  = (div_cpu == div_cpu_n);
-wire ppu_ce  = (div_ppu == div_ppu_n);
-wire cart_ce = (cart_pre & ppu_ce); // First PPU cycle where cpu data is visible.
+reg cpu_ce;
+reg ppu_ce;
+reg ppu_ce2;
+reg cart_ce;
 
-// Signals
-wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
+wire phi2 = div_cpu > 4;
+wire cart_pre  = phi2;
+
+reg [2:0] cpu_tick_count;
+
+
+// TODO: replace with proper CS + Phi2 logic
 wire ppu_read  = (ppu_tick == (cpu_tick_count[2] ? 2 : 1));
 wire ppu_write = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 
-wire phi2 = (div_cpu > 4 && div_cpu < div_cpu_n);
+reg skip_old;
+
+wire skip_pause = ~skip_old & skip_pixel;
 
 // The infamous NES jitter is important for accuracy, but wreks havok on modern devices and scalers,
 // so what I do here is pause the whole system for one PPU clock and insert a "fake" ppu clock to
@@ -194,30 +184,70 @@ wire phi2 = (div_cpu > 4 && div_cpu < div_cpu_n);
 // but all video devices stay happy.
 
 wire skip_pixel;
-reg freeze_clocks = 0;
-reg [4:0] faux_pixel_cnt;
+wire freeze_clocks = |paused_system;
 
-wire use_fake_h = freeze_clocks && faux_pixel_cnt < 6;
+reg [2:0] paused_system;
+wire use_fake_h = freeze_clocks;
 reg [1:0] ppu_tick = 0;
 
 reg [1:0] last_sys_type;
-reg [2:0] cpu_tick_count;
-
-wire skip_ppu_cycle = (cpu_tick_count == 4) && (ppu_tick == 0);
 
 reg hold_reset = 0;
 reg bootvector_flag;
 wire cpu_reset = reset_nes | hold_reset;
 wire reset = cpu_reset | bootvector_flag;
 
-always @(posedge clk) begin
+always @(posedge clk) begin : clocks
+	reg extra_ppu_cycle;
+
+	skip_old <= skip_pixel;
+	if (|paused_system)
+		paused_system <= paused_system - 1'd1;
+
+	if (skip_pause)
+		paused_system <= 3'd4;
+
 	if (reset_nes) hold_reset <= 1;
 	if (cpu_ce) hold_reset <= 0;
-	if (~freeze_clocks | ~(div_ppu == (div_ppu_n - 1'b1))) begin
-		if (~skip_ppu_cycle)
-			div_cpu <= cpu_ce || (ppu_ce && div_cpu > div_cpu_n) ? 5'd1 : div_cpu + 5'd1;
 
-		div_ppu <= ppu_ce ? 3'd1 : div_ppu + 3'd1;
+	cpu_ce <= 0;
+	ppu_ce <= 0;
+	ppu_ce2 <= 0;
+	cart_ce <= 0;
+
+	if (~freeze_clocks) begin
+		div_ppu <= div_ppu + 1'd1;
+		div_cpu <= div_cpu + 1'd1;
+
+		if (div_ppu == div_ppu_n) begin
+			ppu_ce <= 1;
+
+			div_ppu <= 0;
+		end
+
+		// TODO: future use
+		if (div_ppu == div_ppu_n[1])
+			ppu_ce2 <= 1;
+
+		if (div_cpu == div_cpu_n) begin
+			cpu_tick_count <= cpu_tick_count[2] ? 3'd0 : cpu_tick_count + (sys_type == 2'b01);
+			if (cpu_tick_count == 3)
+				extra_ppu_cycle <= 1;
+			cpu_ce <= 1;
+			div_cpu <= 0;
+		end
+
+		// Add 1 ppu cycle every 5 cpu cycles for PAL systems
+		// if (extra_ppu_cycle && div_cpu == div_ppu_n) begin
+		// 	div_cpu <= div_cpu - div_ppu_n;
+		// 	extra_ppu_cycle <= 0;
+		// end
+
+		// In the real system, the cart would tick at the mapper's discretion, usually surrounding
+		// M2, however, to avoid massive combinational logic and ram congestion, we just tick it a
+		// bit later.
+		if (div_cpu == 9)
+			cart_ce <= 1;
 
 		// reset the ticker on the first ppu tick at or after a cpu tick.
 		if (cpu_ce)
@@ -226,25 +256,8 @@ always @(posedge clk) begin
 			ppu_tick <= ppu_tick + 1'b1;
 	end
 
-	// Add one extra PPU tick every 5 cpu cycles for PAL.
-	if (cpu_ce && sys_type[0])
-		cpu_tick_count <= cpu_tick_count[2] ? 3'd0 : cpu_tick_count + 1'b1;
-
 	// SDRAM Clock
 	div_sys <= div_sys + 1'b1;
-
-	// De-Jitter shenanigans
-	if (faux_pixel_cnt == 3)
-		freeze_clocks <= 1'b0;
-
-	if (|faux_pixel_cnt)
-		faux_pixel_cnt <= faux_pixel_cnt - 1'b1;
-
-	if (skip_pixel && (faux_pixel_cnt == 0)) begin
-		freeze_clocks <= 1'b1;
-		faux_pixel_cnt <= {div_ppu_n - 1'b1, 1'b0} + 1'b1;
-	end
-
 
 	if (cpu_reset) begin
 		bootvector_flag <= 1;
@@ -257,9 +270,9 @@ always @(posedge clk) begin
 	// Realign if the system type changes.
 	last_sys_type <= sys_type;
 	if (last_sys_type != sys_type) begin
-		div_cpu <= 5'd1;
-		div_ppu <= 3'd1;
-		div_sys <= 0;
+		div_cpu <= 4'd0;
+		div_ppu <= 2'd0;
+		div_sys <= 2'd3;
 		cpu_tick_count <= 0;
 	end
 end
@@ -290,7 +303,7 @@ T65 cpu(
 	.rdy    (~pause_cpu),
 
 	.IRQ_n  (~(apu_irq | mapper_irq)),
-	.NMI_n  (~nmi),
+	.NMI_n  (nmi),
 	.R_W_n  (cpu_rnw),
 
 	.A      (cpu_addr),
@@ -397,13 +410,9 @@ assign joypad_clock = {joypad2_cs && mr_int, joypad1_cs && mr_int};
 /*************             PPU              ***************/
 /**********************************************************/
 
-// The real PPU has a CS pin which is a combination of the output of the 74319 (ppu address selector)
-// and the M2 pin from the CPU. This will only be low for 1 and 7/8th PPU cycles, or
-// 7 and 1/2 master cycles on NTSC. Therefore, the PPU should read or write once per cpu cycle, and
-// with our alignment, this should occur at PPU cycle 2 (the *third* cycle).
 wire mr_ppu     = mr_int && ppu_read; // Read *from* the PPU.
 wire mw_ppu     = mw_int && ppu_write; // Write *to* the PPU.
-wire ppu_cs = addr >= 'h2000 && addr < 'h4000;
+wire ppu_cs = addr[15:13] == 3'b001;
 wire [7:0] ppu_dout;            // Data from PPU to CPU
 wire chr_read, chr_write, chr_read_ex;       // If PPU reads/writes from VRAM
 wire [13:0] chr_addr, chr_addr_ex;           // Address PPU accesses in VRAM
@@ -415,30 +424,34 @@ assign cycle = use_fake_h ? 9'd340 : ppu_cycle;
 
 PPU ppu(
 	.clk              (clk),
-	.ce               (ppu_ce),
-	.reset            (reset),
-	.sys_type         (sys_type),
-	.color            (color),
-	.din              (dbus),
-	.dout             (ppu_dout),
-	.ain              (addr[2:0]),
-	.read             (ppu_cs && mr_ppu),
-	.write            (ppu_cs && mw_ppu),
-	.nmi              (nmi),
-	.vram_r           (chr_read),
-	.vram_r_ex        (chr_read_ex),
-	.vram_w           (chr_write),
-	.vram_a           (chr_addr),
-	.vram_a_ex        (chr_addr_ex),
-	.vram_din         (chr_to_ppu),
-	.vram_dout        (chr_from_ppu),
-	.scanline         (scanline),
-	.cycle            (ppu_cycle),
+	.CE               (ppu_ce),
+	.CE2              (ppu_ce2),
+	.CS_n             (~(ppu_cs && phi2)),
+	.RESET            (reset),
+	.SYS_TYPE         (sys_type),
+	.COLOR            (color),
+	.DIN              (dbus),
+	.DOUT             (ppu_dout),
+	.AIN              (addr[2:0]),
+	.RW               (mr_int | ~mw_int),
+	.pread             (ppu_cs && mr_ppu),
+	.pwrite            (ppu_cs && mw_ppu),
+	.INT_n            (nmi),
+	.VRAM_R           (chr_read),
+	.VRAM_R_EX        (chr_read_ex),
+	.VRAM_W           (chr_write),
+	.VRAM_AB          (chr_addr),
+	.VRAM_A_EX        (chr_addr_ex),
+	.VRAM_DIN         (chr_to_ppu),
+	.VRAM_DOUT        (chr_from_ppu),
+	.SCANLINE         (scanline),
+	.CYCLE            (ppu_cycle),
 	.mapper_ppu_flags (mapper_ppu_flags),
-	.emphasis         (emphasis),
-	.short_frame      (skip_pixel),
-	.extra_sprites    (ex_sprites),
-	.mask             (mask)
+	.EMPHASIS         (emphasis),
+	.SHORT_FRAME      (skip_pixel),
+	.EXTRA_SPRITES    (ex_sprites),
+	.MASK             (mask),
+	.EXT_IN           (4'b0000)
 );
 
 

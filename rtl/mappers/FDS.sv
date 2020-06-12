@@ -340,7 +340,7 @@ always@(posedge clk20) begin
 			Wstate<=1;
 		else if(~nesprg_we & (prgain==WRITE_HI) & Wstate==1)
 			Wstate<=2;
-		else 
+		else
 			Wstate<=0;
 
 		if(~nesprg_we & (prgain==READ_LO))
@@ -431,17 +431,43 @@ fds_audio fds_audio
 );
 
 wire [11:0] audio_exp;
+wire [15:0] audio_exp_f;
 
-// XXX: This needs to be replaced with a proper ~2000hz LPF
-lpf_aud fds_lpf
-(
-	.CLK(clk),
-	.CE(ce),
-	.IDATA(16'hFFFF - {1'b0, audio_exp[11:0], audio_exp[11:9]}),
-	.ODATA(audio_exp_f)
+reg fds_filter_ce;
+reg [2:0] div_fds;
+
+always @(posedge clk) begin
+	fds_filter_ce <= 0;
+	if (div_fds == 5) begin
+		div_fds <= 0;
+		fds_filter_ce <= 1;
+	end
+	if (~enable) begin
+		fds_filter_ce <= 0;
+		div_fds <= 0;
+	end
+end
+
+IIR_filter #(
+	.coeff_x   (1/1.001260114e+00),
+	.coeff_x0  (1),
+	.coeff_x1  (0),
+	.coeff_x2  (0),
+	.coeff_y0  (0.9964955422),
+	.coeff_y1  (0),
+	.coeff_y2  (0)
+) fds_filter (
+	.clk       (clk),
+	.ce        (fds_filter_ce),
+	.sample_ce (1),
+	.input_l   (16'hFFFF - {1'b0, audio_exp[11:0], audio_exp[11:9]}),
+	.output_l  (audio_exp_f)
 );
 
-wire [15:0] audio_exp_f;
+
+//assign audio_exp_f = 16'hFFFF - {1'b0, audio_exp[11:0], audio_exp[11:9]};
+
+
 wire [16:0] audio = audio_in + audio_exp_f;
 assign audio_out = 16'hFFFF - audio[16:1];
 

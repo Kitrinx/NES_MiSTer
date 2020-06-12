@@ -534,7 +534,7 @@ module DmcChan (
 	};
 
 	assign Sample = dmc_volume_next[6:0];
-	assign dma_req = ~have_buffer & enable & enable_3;
+	assign dma_req = ~have_buffer & enable_3;
 	logic dmc_clock;
 
 	assign dma_address[15] = 1;
