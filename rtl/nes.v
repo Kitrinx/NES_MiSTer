@@ -424,6 +424,8 @@ PPU ppu(
 	.ain              (addr[2:0]),
 	.read             (ppu_cs && mr_ppu),
 	.write            (ppu_cs && mw_ppu),
+	.read_raw         (mr_int && ppu_cs && phi2),
+	.write_raw        (mw_int && ppu_cs && phi2),
 	.nmi              (nmi),
 	.vram_r           (chr_read),
 	.vram_r_ex        (chr_read_ex),

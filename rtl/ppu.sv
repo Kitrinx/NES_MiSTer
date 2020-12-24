@@ -4,6 +4,243 @@
 // altera message_off 10935
 // altera message_off 10027
 
+// Generates the current scanline / cycle counters
+module ClockGen(
+	input  logic       clk,
+	input  logic       ce,
+	input  logic       ce2,
+	input  logic       reset,
+	input  logic [1:0] sys_type,
+	input  logic       rendering_enabled,
+	output logic       held_reset,
+	output logic [8:0] scanline,
+	output logic [8:0] cycle,
+	output logic       end_of_line,
+	output logic       at_last_cycle_group,
+	output logic       exiting_vblank,
+	output logic       entering_vblank,
+	output logic       short_frame,
+	output logic       clr_vbl_ovf_sp0,
+	output logic       is_pre_render,
+	output logic       is_visible,
+	output logic       is_rendering,
+	output logic       pclk0,        // Phase clock 0
+	output logic       pclk1,         // Phase clock 1
+	output logic       is_vbe_sl
+);
+
+// State
+logic even_frame_toggle = 0; // 1 indicates even frame.
+
+// Ephmeral state
+logic [1:0] clk_delay;
+
+// Nonvolatile State
+logic [8:0] vblank_start_sl;
+logic [8:0] vblank_end_sl;
+logic skip_en;
+
+// Continuous Intermediates
+logic skip_dot;
+
+assign pclk0 = ce;
+assign pclk1 = ce2;
+
+// The pre render flag is set while we're on scanline -1.
+assign is_rendering = rendering_enabled & (is_visible | is_pre_render);
+assign at_last_cycle_group = (cycle[8:3] == 42);
+assign end_of_line = at_last_cycle_group && (cycle[2:0] == (skip_dot ? 3 : 4));
+
+// For NTSC only, the *last* cycle of odd frames is skipped. This signal is for de-jitter.
+assign short_frame = end_of_line & skip_dot;
+
+// All vblank clocked registers should have changed and be readable by cycle 1 of the vblank scanlines
+assign entering_vblank = (cycle == 0) && scanline == vblank_start_sl;
+assign exiting_vblank = (cycle == 0) && is_pre_render;
+
+assign is_vbe_sl = (scanline == vblank_end_sl);
+// This flag clears the sprite zero hit, sprite overflow, held_reset, and is_visible registers
+assign clr_vbl_ovf_sp0 = is_vbe_sl && end_of_line;
+
+
+
+always @(posedge clk) if (reset) begin
+	cycle <= 9'd0;
+	scanline <= 9'd0;
+	even_frame_toggle <= 1; // Resets to 0.
+	held_reset <= 1;
+	is_visible <= 0;
+
+	case (sys_type)
+		2'b00,2'b11: begin // NTSC/Vs.
+			vblank_start_sl <= 9'd241;
+			vblank_end_sl   <= 9'd260;
+			skip_en         <= 1'b1;
+		end
+
+		2'b01: begin       // PAL
+			vblank_start_sl <= 9'd241;
+			vblank_end_sl   <= 9'd310;
+			skip_en         <= 1'b0;
+		end
+
+		2'b10: begin       // Dendy
+			vblank_start_sl <= 9'd291;
+			vblank_end_sl   <= 9'd310;
+			skip_en         <= 1'b0;
+		end
+	endcase
+end else begin
+	if (pclk1) // The determinaton to advance to the next line is made at pclk1
+		skip_dot <= is_pre_render && ~even_frame_toggle && is_rendering && skip_en;
+
+	if (pclk0) begin
+		cycle <= cycle + 9'd1;
+		if (clr_vbl_ovf_sp0) begin
+			held_reset <= 0;
+			is_visible <= 1;
+		end
+
+		if (end_of_line) begin
+			cycle <= 9'd0;
+
+			if (scanline == 239)
+				is_visible <= 0;
+			// Once the scanline counter reaches end of 260, it gets reset to -1.
+			if (scanline == vblank_end_sl) begin
+				scanline <= 9'd511;
+				is_pre_render <= 1;
+			end else begin
+				scanline <= scanline + 1'd1;
+				is_pre_render <= 0;
+			end
+
+			if (scanline == 255)
+				even_frame_toggle <= ~even_frame_toggle;
+		end
+	end
+end
+
+endmodule // ClockGen
+
+module VramGen (
+	input  logic        clk,
+	input  logic        reset,
+	input  logic        ce,
+	input  logic        pclk1,
+	input  logic        read_ce,
+	input  logic        write_ce,
+	input  logic        is_rendering,
+	input  logic        rendering_enabled,
+	input  logic  [2:0] ain,           // input address from CPU
+	input  logic  [7:0] din,           // data input
+	input  logic        read,          // read
+	input  logic        write,         // write
+	input  logic        is_pre_render, // Is this the pre-render scanline
+	input  logic  [8:0] cycle,
+	input  logic        ppu_incr,
+	input  logic        HVTog,
+	output logic [14:0] vram_v,
+	output logic  [2:0] fine_x_scroll  // Current fine_x_scroll value
+);
+
+// Temporary VRAM address register
+logic [14:0] vram_t;
+
+// SR To delay 2006 copy to vram_v
+logic [3:0] delayed_2006_write;
+logic pending_2006_trig;
+
+// Other intermediates
+logic [14:0] vram_t_mask;
+logic trigger_2007;
+logic write_2006, write_2006_1, write_2006_2;
+
+// VRAM_v reference:
+// [14 13 12] [11 10] [9 8 7 6 5] [4 3 2 1 0]
+//  Fine Y     NT Sel  Coarse Y    Coarse X
+// Fine X is its own seperate register.
+
+// Performs the glitchy vram_scroll used by Burai Fighter and some others
+assign trigger_2007 = ((read || write) && ain == 7); // FIXME: Assumes 1 pclk0 tick per read/write. Should be delayed to falling edge of phi2?
+
+// Mask used to simulate glitchy behavior caused by a 2006 delayed write landing on the same cycle
+// as natural copy from t->v
+assign vram_t_mask = write_2006 ? vram_t : 15'h7FFF;
+
+always @(posedge clk) if (reset) begin
+	vram_t <= 0;
+	fine_x_scroll <= 0;
+end else begin
+	// Copies from T to V are delayed by 1 pclk1 and then 2 pclk0 cycles after the second 2006 write
+	if (pclk1) begin
+		pending_2006_trig <= 0;
+		write_2006_1 <= pending_2006_trig;
+	end
+
+	if (ce) begin
+		write_2006_2 <= write_2006_1;
+		write_2006 <= write_2006_2;
+
+		// Horizontal copy at cycle 257 and rendering OR if delayed 2006 write
+		if (is_rendering && cycle == 256 || write_2006)
+			{vram_v[10], vram_v[4:0]} <= {vram_t[10], vram_t[4:0]};
+
+		// Vertical copy at Cycles 280 to 305 and rendering OR delayed 2006 write
+		if (cycle >= 279 && cycle < 304 && is_pre_render && rendering_enabled || write_2006)
+			{vram_v[14:11], vram_v[9:5]} <= {vram_t[14:11], vram_t[9:5]};
+
+		// Increment course X scroll from (cycle 0-255 or 320-335) and cycle[2:0] == 7
+		if (is_rendering && ((cycle[2:0] == 7 && (~cycle[8] || (cycle[8] && cycle[6]))) || trigger_2007)) begin
+			vram_v[4:0] <= (vram_v[4:0] + 1'd1) & vram_t_mask[4:0];
+			vram_v[10] <= (vram_v[10] ^ &vram_v[4:0]) & vram_t_mask[10];
+		end
+
+		// Vertical Increment at 256 and rendering
+		if (is_rendering && (cycle == 255 || trigger_2007)) begin
+			vram_v[14:12] <= (vram_v[14:12] + 1'd1) & vram_t_mask[14:12];
+			vram_v[9:5] <= vram_v[9:5] & vram_t_mask[9:5];
+			vram_v[11] <= vram_v[11] & vram_t_mask[11];
+			if (vram_v[14:12] == 7) begin
+				if (vram_v[9:5] == 29) begin
+					vram_v[9:5] <= 0;
+					vram_v[11] <= ~vram_v[11] & vram_t_mask[11];
+				end else begin
+					vram_v[9:5] <= (vram_v[9:5] + 1'd1) & vram_t_mask[9:5];
+				end
+			end
+		end
+	end
+
+	if (write_ce && ain == 6 && HVTog)
+		pending_2006_trig <= 1;
+
+	if (write && ain == 0) begin
+		vram_t[10] <= din[0];
+		vram_t[11] <= din[1];
+	end else if (write && ain == 5) begin
+		if (!HVTog) begin
+			vram_t[4:0] <= din[7:3];
+			fine_x_scroll <= din[2:0];
+		end else begin
+			vram_t[9:5] <= din[7:3];
+			vram_t[14:12] <= din[2:0];
+		end
+	end else if (write && ain == 6) begin
+		if (!HVTog) begin
+			vram_t[13:8] <= din[5:0];
+			vram_t[14] <= 0;
+		end else begin
+			vram_t[7:0] <= din;
+		end
+	end else if ((read_ce || write_ce) && ain == 7 && ~is_rendering) begin
+		// Increment address every time we accessed a reg
+		vram_v <= vram_v + (ppu_incr ? 15'd32 : 15'd1);
+	end
+end
+
+endmodule
+
 // Module handles updating the loopy scroll register
 module LoopyGen (
 	input clk,
@@ -140,7 +377,7 @@ endmodule
 
 
 // Generates the current scanline / cycle counters
-module ClockGen(
+module ClockGenOld(
 	input clk,
 	input ce,
 	input reset,
@@ -610,7 +847,7 @@ end else if (ce) begin
 	// XXX: This delay is nessisary probably because the OAM handling is a cycle early
 	spr_overflow <= overflow;
 
-	if (is_vbe && cycle == 340) begin
+	if (is_vbe) begin
 		overflow <= 0;
 		spr_overflow <= 0;
 	end
@@ -915,6 +1152,8 @@ module PPU(
 	input   [2:0] ain,              // input address from CPU
 	input         read,             // read
 	input         write,            // write
+	input         read_raw,         // real read pin
+	input         write_raw,        // real write pin
 	output reg    nmi,              // one while inside vblank
 	output        vram_r,           // read from vram active
 	output        vram_r_ex,        // use extra sprite address
@@ -958,9 +1197,9 @@ end
 
 reg nmi_occured;         // True if NMI has occured but not cleared.
 reg [7:0] vram_latch;
-
+//logic is_rendering;
 // Clock generator
-wire is_in_vblank;        // True if we're in VBLANK
+//wire is_in_vblank;        // True if we're in VBLANK
 wire end_of_line;         // At the last pixel of a line
 wire at_last_cycle_group; // At the very last cycle group of the scan line.
 wire exiting_vblank;      // At the very last cycle of the vblank
@@ -972,44 +1211,13 @@ reg enable_playfield, enable_objects;
 wire rendering_enabled = enable_objects | enable_playfield;
 
 // 2C02 has an "is_vblank" flag that is true from pixel 0 of line 241 to pixel 0 of line 0;
-wire is_rendering = rendering_enabled && (scanline < 240 || is_pre_render_line);
+//wire is_rendering = rendering_enabled && (scanline < 240 || is_pre_render_line);
 wire is_vbe_sl;
 
-ClockGen clock(
-	.clk                 (clk),
-	.ce                  (ce),
-	.reset               (reset),
-	.sys_type            (sys_type),
-	.is_rendering        (rendering_enabled),
-	.scanline            (scanline),
-	.cycle               (cycle),
-	.is_in_vblank        (is_in_vblank),
-	.end_of_line         (end_of_line),
-	.at_last_cycle_group (at_last_cycle_group),
-	.exiting_vblank      (exiting_vblank),
-	.entering_vblank     (entering_vblank),
-	.is_pre_render       (is_pre_render_line),
-	.short_frame         (short_frame),
-	.is_vbe_sl           (is_vbe_sl)
-);
 
 // The loopy module handles updating of the loopy address
 wire [14:0] loopy;
 wire [2:0] fine_x_scroll;
-
-LoopyGen loopy0(
-	.clk           (clk),
-	.ce            (ce),
-	.is_rendering  (is_rendering),
-	.ain           (ain),
-	.din           (din),
-	.read          (read),
-	.write         (write),
-	.is_pre_render (is_pre_render_line),
-	.cycle         (cycle),
-	.loopy         (loopy),
-	.fine_x_scroll (fine_x_scroll)
-);
 
 // Set to true if the current ppu_addr pointer points into palette ram.
 wire is_pal_address = (loopy[13:8] == 6'b111111);
@@ -1052,7 +1260,7 @@ OAMEval spriteeval (
 	.oam_din           (din),
 	.spr_overflow      (sprite_overflow),
 	.sprite0           (obj0_on_line),
-	.is_vbe            (is_vbe_sl),
+	.is_vbe            (clr_vbl_ovf_sp0),
 	.PAL               (sys_type[0]),
 	.masked_sprites    (masked_sprites)
 );
@@ -1128,7 +1336,7 @@ wire [4:0] obj_pixel = {obj_pixel_noblank[4:2], show_obj_on_pixel ? obj_pixel_no
 
 reg sprite0_hit_bg;            // True if sprite#0 has collided with the BG in the last frame.
 always @(posedge clk) if (ce) begin
-	if (cycle == 340 && is_vbe_sl) begin
+	if (clr_vbl_ovf_sp0) begin
 		sprite0_hit_bg <= 0;
 	end else if (
 		is_rendering        &&    // Object rendering is enabled
@@ -1216,32 +1424,213 @@ assign color = (mask_right | mask_left | mask_pal) ? 6'h0E : color1;
 wire clear_nmi = (exiting_vblank | (read && ain == 2));
 wire set_nmi = entering_vblank & ~clear_nmi;
 
+logic pclk0;
+logic pclk1;
+logic held_reset;
+logic is_visible;
+logic clr_vbl_ovf_sp0;
+//logic is_pre_render;
+logic master_mode;
+logic HVTog;
+
+
+logic [7:0] delay_2001, latch_2001;
+logic [7:0] delay_2000, latch_2000;
+logic addr_inc;
+logic read_old;
+logic write_old;
+logic read_ce;
+logic write_ce;
+
+always @(posedge clk) begin
+	read_old <= read_raw;
+	write_old <= write_raw;
+end
+
+assign write_ce = write_raw & ~write_old;
+assign read_ce = read_raw & ~read_old;
+
+// FIXME: move this logic to core's clock generators.
+reg [1:0] ce2_cnt = 0;
+wire CE2 = ce2_cnt == 1;
+always_ff @(posedge clk) begin
+	if (ce2_cnt) ce2_cnt <= ce2_cnt - 1'd1;
+	if (ce) ce2_cnt <= 2;
+end
+
+// assign pclk0 = ce;
+// assign pclk1 = CE2;
+logic is_rendering;
+
+// ClockGen clock(
+// 	.clk                 (clk),
+// 	.ce                  (ce),
+// 	.reset               (reset),
+// 	.sys_type            (sys_type),
+// 	.is_rendering        (rendering_enabled),
+// 	.scanline            (scanline),
+// 	.cycle               (cycle),
+// 	.is_in_vblank        (is_in_vblank),
+// 	.end_of_line         (end_of_line),
+// 	.at_last_cycle_group (at_last_cycle_group),
+// 	.exiting_vblank      (exiting_vblank),
+// 	.entering_vblank     (entering_vblank),
+// 	.is_pre_render       (is_pre_render_line),
+// 	.short_frame         (short_frame),
+// 	.is_vbe_sl           (is_vbe_sl)
+// );
+
+
+ClockGen clock(
+	.clk                 (clk),
+	.ce                  (ce),
+	.ce2                 (CE2),
+	.reset               (reset),
+	.held_reset          (held_reset),
+	.sys_type            (sys_type),
+	.rendering_enabled   (rendering_enabled),
+	.scanline            (scanline),
+	.cycle               (cycle),
+	.end_of_line         (end_of_line),
+	.at_last_cycle_group (at_last_cycle_group),
+	.exiting_vblank      (exiting_vblank),
+	.entering_vblank     (entering_vblank),
+	.is_pre_render       (is_pre_render_line),
+	.is_visible          (is_visible),
+	.is_rendering        (is_rendering),
+	.short_frame         (short_frame),
+	.clr_vbl_ovf_sp0     (clr_vbl_ovf_sp0),
+	.pclk0               (pclk0),
+	.pclk1               (pclk1),
+	.is_vbe_sl           (is_vbe_sl) //FIXME: Deprecated, switch to clr_vbl_ovf_sp0
+);
+
+VramGen vram_v0(
+	.clk                 (clk),
+	.reset               (reset),
+	.ce                  (pclk0),
+	.pclk1               (pclk1),
+	.ppu_incr            (addr_inc),
+	.read_ce             (read_ce),
+	.write_ce            (write_ce),
+	.is_rendering        (is_rendering),
+	.rendering_enabled   (rendering_enabled),
+	.ain                 (ain),
+	.din                 (din),
+	.read                (read_raw),
+	.write               (write_raw),
+	.is_pre_render       (is_pre_render_line),
+	.cycle               (cycle),
+	.HVTog               (HVTog),
+	.vram_v              (loopy),
+	.fine_x_scroll       (fine_x_scroll)
+);
+
+// After spending a few sultry afternoons with visual 2c02, it seems that writes to the PPU follow a
+// pattern most of the time. Read and Write are almost always goverened by three inputs: The cpu's
+// read-or-write signal, the CE signal (called CS here) which is defined as phi2 AND the cpu address
+// is in ppu range, and lastly by the lowest three bits of the address bus itself. In practice what
+// this means is that when (write & phi2) are true, the CPU latches to an internal register, but the
+// rest of the chip doesn't see this yet. When phi2 goes low, finally the chip reconnects the
+// latching register to the internal wires and the effects of the writes take effect. The exceptions
+// to this are Enable NMI, Slave Mode, and Grayscale which appear run wires directly to the latching
+// register, and thus take effect as soon as (write & ce) are true. HVTog, 2006 and 2005 writes seem
+// to behave the same as described above.
+
+// These three signals tap directly into the latch register and apply instantly
+assign vbl_enable = write_raw && ain == 0 ? din[7] : delay_2000[7];
+//assign master_mode = write_raw && ain == 0 ? din[6] : delay_2000[6]; // In case it's ever needed
+assign grayscale = write_raw && ain == 1 ? din[0] : delay_2001[0];
+
+// 2000 Latched data, only applies after the write signal goes low
+assign addr_inc = ~write_raw ? delay_2000[2] : latch_2000[2];
+assign obj_patt = ~write_raw ? delay_2000[3] : latch_2000[3];
+assign bg_patt = ~write_raw ? delay_2000[4] : latch_2000[4];
+assign obj_size = ~write_raw ? delay_2000[5] : latch_2000[5];
+
+// 2001 Latched data, only applies after the write signal goes low
+assign playfield_clip = ~write_raw ? delay_2001[1] : latch_2001[1];
+assign object_clip = ~write_raw ? delay_2001[2] : latch_2001[2];
+assign enable_playfield = ~write_raw ? delay_2001[3] : latch_2001[3];
+assign enable_objects = ~write_raw ? delay_2001[4] : latch_2001[4];
+
+assign emphasis[1:0] = ~write_raw ?
+	(|sys_type ? {delay_2001[5], delay_2001[6]} : delay_2001[6:5]) :
+	(|sys_type ? {latch_2001[5], latch_2001[6]} : latch_2001[6:5]);
+assign emphasis[2] = write_raw && ain == 1 ? din[7] : delay_2001[7];
+
+
+logic hv_latch;
+
+always @(posedge clk) begin
+	if (reset) begin
+		//vbl_flag <= 0;
+		delay_2000 <= 8'd0;
+		delay_2001 <= 8'd0;
+		latch_2000 <= 8'd0;
+		latch_2001 <= 8'd0;
+		HVTog <= 0;
+		hv_latch <= 0;
+	end else begin
+		if (read_raw && ain == 2)
+			hv_latch <= 0;
+
+		if (write_raw) begin
+			case (ain)
+				0: begin // PPU Control Register 1
+					delay_2000 <= din;
+				end
+
+				1: begin // PPU Control Register 2
+					delay_2001 <= din;
+				end
+
+				5, 6: hv_latch <= ~HVTog;
+			endcase
+		end else begin
+			HVTog <= hv_latch;
+			latch_2000 <= delay_2000;
+			latch_2001 <= delay_2001;
+		end
+	end
+
+	// if (pclk0) begin
+	// 	if (exiting_vblank)
+	// 		vbl_flag <= 0;
+	// 	else if (entering_vblank)
+	// 		vbl_flag <= 1;
+	// end
+
+	// if (read && AIN == 2)
+	// 	vbl_flag <= 0;
+end
+
 always @(posedge clk)
 if (ce) begin
 	if (reset) begin
-		{obj_patt, bg_patt, obj_size, vbl_enable} <= 0; // 2000 resets to 0
-		{grayscale, playfield_clip, object_clip, enable_playfield, enable_objects, emphasis} <= 0; // 2001 resets to 0
+	// 	{obj_patt, bg_patt, obj_size, vbl_enable} <= 0; // 2000 resets to 0
+	// 	{grayscale, playfield_clip, object_clip, enable_playfield, enable_objects, emphasis} <= 0; // 2001 resets to 0
 		nmi_occured <= 0;
-	end else if (write) begin
-		case (ain)
-			0: begin // PPU Control Register 1
-				// t:....BA.. ........ = d:......BA
-				obj_patt <= din[3];
-				bg_patt <= din[4];
-				obj_size <= din[5];
-				vbl_enable <= din[7];
-			end
+	end //else if (write) begin
+	// 	case (ain)
+	// 		0: begin // PPU Control Register 1
+	// 			// t:....BA.. ........ = d:......BA
+	// 			obj_patt <= din[3];
+	// 			bg_patt <= din[4];
+	// 			obj_size <= din[5];
+	// 			vbl_enable <= din[7];
+	// 		end
 
-			1: begin // PPU Control Register 2
-				grayscale <= din[0];
-				playfield_clip <= din[1];
-				object_clip <= din[2];
-				enable_playfield <= din[3];
-				enable_objects <= din[4];
-				emphasis <= |sys_type ? {din[7], din[5], din[6]} : din[7:5];
-			end
-		endcase
-	end
+	// 		1: begin // PPU Control Register 2
+	// 			grayscale <= din[0];
+	// 			playfield_clip <= din[1];
+	// 			object_clip <= din[2];
+	// 			enable_playfield <= din[3];
+	// 			enable_objects <= din[4];
+	// 			emphasis <= |sys_type ? {din[7], din[5], din[6]} : din[7:5];
+	// 		end
+	// 	endcase
+	// end
 	// https://wiki.nesdev.com/w/index.php/NMI
 	if (set_nmi)
 		nmi_occured <= 1;
