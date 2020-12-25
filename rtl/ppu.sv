@@ -154,6 +154,9 @@ logic pending_2006_trig;
 // Other intermediates
 logic [14:0] vram_t_mask;
 logic trigger_2007;
+logic trigger_2007_cur;
+logic trigger_2007_latch;
+
 logic write_2006, write_2006_1, write_2006_2;
 
 // VRAM_v reference:
@@ -162,8 +165,8 @@ logic write_2006, write_2006_1, write_2006_2;
 // Fine X is its own seperate register.
 
 // Performs the glitchy vram_scroll used by Burai Fighter and some others
-assign trigger_2007 = ((read || write) && ain == 7); // FIXME: Assumes 1 pclk0 tick per read/write. Should be delayed to falling edge of phi2?
-
+// FIXME: Assumes 1 pclk0 tick per read/write. Should be delayed to falling edge of phi2?
+assign trigger_2007 = (trigger_2007_cur && (read_n || write_n)) | trigger_2007_latch;
 // Mask used to simulate glitchy behavior caused by a 2006 delayed write landing on the same cycle
 // as natural copy from t->v
 assign vram_t_mask = write_2006 ? vram_t : 15'h7FFF;
@@ -183,6 +186,11 @@ end else begin
 	old_read <= read;
 	old_write <= write;
 
+	 trigger_2007_cur <= ((read || write) && ain == 7);
+
+	if (read_n || write_n)
+		trigger_2007_latch <= trigger_2007_cur;
+
 	// Copies from T to V are delayed by 1 pclk1 and then 2 pclk0 cycles after the second 2006 write
 	if (pclk1) begin
 		pending_2006_trig <= 0;
@@ -190,6 +198,7 @@ end else begin
 	end
 
 	if (ce) begin
+		trigger_2007_latch <= 0;
 		write_2006_2 <= write_2006_1;
 		write_2006 <= write_2006_2;
 
@@ -244,7 +253,7 @@ end else begin
 		end else begin
 			vram_t[7:0] <= din;
 		end
-	end else if ((read_n || write_n) && ain == 7 && ~is_rendering) begin
+	end else if (trigger_2007_cur && (read_n || write_n) && ~is_rendering) begin
 		// Increment address every time we accessed a reg
 		vram_v <= vram_v + (ppu_incr ? 15'd32 : 15'd1);
 	end
