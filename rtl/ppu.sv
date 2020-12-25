@@ -168,10 +168,21 @@ assign trigger_2007 = ((read || write) && ain == 7); // FIXME: Assumes 1 pclk0 t
 // as natural copy from t->v
 assign vram_t_mask = write_2006 ? vram_t : 15'h7FFF;
 
+logic read_n;
+logic write_n;
+logic old_read;
+logic old_write;
+
+assign read_n = ~read & old_read;
+assign write_n = ~write & old_write;
+
 always @(posedge clk) if (reset) begin
 	vram_t <= 0;
 	fine_x_scroll <= 0;
 end else begin
+	old_read <= read;
+	old_write <= write;
+
 	// Copies from T to V are delayed by 1 pclk1 and then 2 pclk0 cycles after the second 2006 write
 	if (pclk1) begin
 		pending_2006_trig <= 0;
@@ -233,148 +244,13 @@ end else begin
 		end else begin
 			vram_t[7:0] <= din;
 		end
-	end else if ((read_ce || write_ce) && ain == 7 && ~is_rendering) begin
+	end else if ((read_n || write_n) && ain == 7 && ~is_rendering) begin
 		// Increment address every time we accessed a reg
 		vram_v <= vram_v + (ppu_incr ? 15'd32 : 15'd1);
 	end
 end
 
 endmodule
-
-// Module handles updating the loopy scroll register
-module LoopyGen (
-	input clk,
-	input ce,
-	input is_rendering,
-	input [2:0] ain,     // input address from CPU
-	input [7:0] din,     // data input
-	input read,          // read
-	input write,         // write
-	input is_pre_render, // Is this the pre-render scanline
-	input [8:0] cycle,
-	output [14:0] loopy,
-	output [2:0] fine_x_scroll  // Current loopy value
-);
-
-// Controls how much to increment on each write
-reg ppu_incr; // 0 = 1, 1 = 32
-// Current VRAM address
-reg [14:0] loopy_v;
-// Temporary VRAM address
-reg [14:0] loopy_t;
-// Fine X scroll (3 bits)
-reg [2:0] loopy_x;
-// Latch
-reg ppu_address_latch;
-reg [7:0] din_shift[2];
-reg [1:0] write_shift;
-reg [1:0] latch_shift;
-
-initial begin
-	ppu_incr = 0;
-	loopy_v = 0;
-	loopy_t = 0;
-	loopy_x = 0;
-	ppu_address_latch = 0;
-end
-
-// Handle updating loopy_t and loopy_v
-always @(posedge clk) if (ce) begin
-	if (is_rendering) begin
-		// Increment course X scroll right after attribute table byte was fetched.
-		if (cycle[2:0] == 3 && (cycle < 256 || cycle >= 320 && cycle < 336)) begin
-			loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
-			loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
-		end
-
-		// Vertical Increment
-		if (cycle == 251) begin
-			loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
-			if (loopy_v[14:12] == 7) begin
-				if (loopy_v[9:5] == 29) begin
-					loopy_v[9:5] <= 0;
-					loopy_v[11] <= !loopy_v[11];
-				end else begin
-					loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
-				end
-			end
-		end
-
-		// Horizontal Reset at cycle 257
-		if (cycle == 256)
-			{loopy_v[10], loopy_v[4:0]} <= {loopy_t[10], loopy_t[4:0]};
-
-		// On cycle 256 of each scanline, copy horizontal bits from loopy_t into loopy_v
-		// On cycle 304 of the pre-render scanline, copy loopy_t into loopy_v
-		if (cycle == 304 && is_pre_render) begin
-			loopy_v <= loopy_t;
-		end
-	end
-
-	if (write && ain == 0) begin
-		loopy_t[10] <= din[0];
-		loopy_t[11] <= din[1];
-		ppu_incr <= din[2];
-	end else if (write && ain == 5) begin
-		if (!ppu_address_latch) begin
-			loopy_t[4:0] <= din[7:3];
-			loopy_x <= din[2:0];
-		end else begin
-			loopy_t[9:5] <= din[7:3];
-			loopy_t[14:12] <= din[2:0];
-		end
-		ppu_address_latch <= !ppu_address_latch;
-	end else if (write && ain == 6) begin
-		ppu_address_latch <= !ppu_address_latch;
-	end else if (read && ain == 2) begin
-		ppu_address_latch <= 0; //Reset PPU address latch
-	end else if ((read || write) && ain == 7) begin
-		// Increment address every time we accessed a reg
-		if (~is_rendering) begin
-			loopy_v <= loopy_v + (ppu_incr ? 15'd32 : 15'd1);
-		end else begin
-			// During rendering (on the pre-render line and the visible lines 0-239, provided either background or sprite rendering is
-			// enabled), it will update v in an odd way, triggering a coarse X increment and a Y increment simultaneously (with normal
-			// wrapping behavior). Internally, this is caused by the carry inputs to various sections of v being set up for rendering,
-			// and the $2007 access triggering a "load next value" signal for all of v (when not rendering, the carry inputs are set up
-			// to linearly increment v by either 1 or 32). This behavior is not affected by the status of the increment bit. The Young
-			// Indiana Jones Chronicles uses this for some effects to adjust the Y scroll during rendering, and also Burai Fighter (U)
-			// to draw the scorebar.
-			loopy_v[4:0] <= loopy_v[4:0] + 1'd1;
-			loopy_v[10] <= loopy_v[10] ^ (loopy_v[4:0] == 31);
-			loopy_v[14:12] <= loopy_v[14:12] + 1'd1;
-			if (loopy_v[14:12] == 7) begin
-				if (loopy_v[9:5] == 29) begin
-					loopy_v[9:5] <= 0;
-					loopy_v[11] <= !loopy_v[11];
-				end else begin
-					loopy_v[9:5] <= loopy_v[9:5] + 1'd1;
-				end
-			end
-		end
-	end
-
-	// Writes to vram address appear to be delayed by 2 cycles
-	latch_shift <= {latch_shift[0], ppu_address_latch};
-	write_shift <= {write_shift[0], (write && ain == 6)};
-	din_shift <= '{din, din_shift[0]};
-
-	if (write_shift[1]) begin
-		if (!latch_shift[1]) begin
-			loopy_t[13:8] <= din_shift[1][5:0];
-			loopy_t[14] <= 0;
-		end else begin
-			loopy_t[7:0] <= din_shift[1];
-			loopy_v <= {loopy_t[14:8], din_shift[1]};
-		end
-	end
-end
-
-assign loopy = loopy_v;
-assign fine_x_scroll = loopy_x;
-
-endmodule
-
 
 // Generates the current scanline / cycle counters
 module ClockGenOld(
