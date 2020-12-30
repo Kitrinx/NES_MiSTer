@@ -311,9 +311,7 @@ always @(posedge clk) begin
 		last_read_exattr <= last_read_ram;
 	end
 
-	last_chr_read <= chr_read;
-
-	if (!chr_read && last_chr_read)
+	if (chr_read)
 		last_read_vram <= extended_ram_mode[1] ? 8'b0 : last_read_ram;
 end
 

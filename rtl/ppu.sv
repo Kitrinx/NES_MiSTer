@@ -533,8 +533,8 @@ always_comb begin
 			oam_temp_ex_full_addr = {1'b1, oam_temp_slot_ex[2:0], oam_addr_ex[1:0]};
 
 			if (evaluating) begin
-				oam_db = ~write_cycle ? oamd : oam_temp_wren ? oamd : oamtd; // FIXME: Odd or even?
-				oam_ex_db = oamxd; // FIXME: Odd or even?
+				oam_db = ~write_cycle ? oamd : oam_temp_wren ? oamd : oamtd;
+				oam_ex_db = oamxd;
 				`ifdef EXTRA_SPRITES
 				oam_temp_ex_wren = (~ex_ovr && write_cycle);
 				`endif
@@ -559,7 +559,7 @@ dpram #(.widthad_a(6), .width_a(8)) OAM_temp_ram //64 * 8 bits
 	.clock_a   (clk),
 	.address_a (oam_temp_full_addr),
 	.data_a    (oam_state == STATE_EVAL ? oam_bus : 8'hFF),
-	.wren_a    (oam_temp_wren_adj), // FIXME: Odd or even?
+	.wren_a    (oam_temp_wren_adj),
 	.q_a       (oamtd),
 
 	.clock_b   (clk),
@@ -985,7 +985,6 @@ always @(posedge clk) if (ce) begin
 				vram_data[7:6];
 
 			5: bg0 <= vram_data; // Pattern table bitmap #0
-			//7: bg1 <= vram_data; // Pattern table bitmap #1
 		endcase
 		playfield_pipe_1[14:0] <= playfield_pipe_1[15:1];
 		playfield_pipe_2[14:0] <= playfield_pipe_2[15:1];
@@ -1235,6 +1234,7 @@ assign is_pal_address = &vram_v[13:8];
 assign palette_write = write_ce && (AIN == 7) && is_pal_address;
 assign pram_addr = is_rendering ? pixel : (is_pal_address ? vram_v[4:0] : (master_mode ? 5'd0 : {1'd0, EXT_IN}));
 assign vram_r_ppudata = read && (AIN == 7);
+assign rendering_enabled = enable_objects | enable_playfield;
 
 // Colors and Masking
 assign show_obj = (object_clip || ~clip_area) && enable_objects;
@@ -1265,8 +1265,8 @@ assign EXT_OUT = master_mode ? pram_addr[3:0] : EXT_IN;
 assign DOUT = latched_dout;
 assign VRAM_W = write && (AIN == 7) && !is_pal_address && !is_rendering;
 assign VRAM_DOUT = DIN;
-assign VRAM_R = (vram_r_ppudata && ~vram_read_done) || is_rendering && ~CYCLE[0] && (|CYCLE || skipped);
-assign ALE = is_rendering ? CYCLE[0] : ((read_ce || write_ce) && AIN == 7);
+assign VRAM_R = vram_r_ppudata || (is_rendering && CYCLE[0]);
+assign ALE = is_rendering ? ~CYCLE[0] : ((read_ce || write_ce) && AIN == 7);
 assign VRAM_AB = vram_a;
 assign VRAM_A_EX = {1'b0, sprite_vram_addr_ex};
 assign COLOR = color1;
@@ -1284,7 +1284,7 @@ always_comb begin
 		else
 			VRAM_R_EX = 0;
 
-		if (CYCLE[2:1] == 0 || CYCLE > 338 || skipped)
+		if (CYCLE[2:1] == 0 || CYCLE > 338)
 			vram_a = {2'b10, vram_v[11:0]};                                     // Name Table
 		else if (CYCLE[2:1] == 1)
 			vram_a = {2'b10, vram_v[11:10], 4'b1111, vram_v[9:7], vram_v[4:2]}; // Attribute table
@@ -1488,8 +1488,6 @@ PaletteRam palette_ram(
 	.write_ce   (palette_write) // Condition for writing
 );
 
-
-
 // One cycle after vram_r was asserted, the value is available on the bus. vram read delayed is
 // actually read2007_done 2007 reads take two cycles, one for address latch, one for reading. vram
 // reads or writes take two PPU cycles. ALE is active when 2007 read or write happens, which latches
@@ -1497,7 +1495,6 @@ PaletteRam palette_ram(
 
 logic vram_read_done;
 
-assign rendering_enabled = enable_objects | enable_playfield;
 
 always @(posedge clk) begin
 	read_old <= read;
@@ -1548,36 +1545,21 @@ always @(posedge clk) begin
 			sprite0_hit_bg <= 1;
 	end
 
-	if (pclk0)
+	if (pclk0) begin
 		skipped <= SHORT_FRAME;
 
-
-	if (pclk0) begin
 		color_pipe <= '{color2, color_pipe[0], color_pipe[1], color_pipe[2]};
 		is_rendering_delayed <= is_rendering;
-	end
 
-	if (pclk0) begin
 		if (clr_vbl_ovf_sp0)
 			vbl_flag <= 0;
 		else if (entering_vblank)
 			vbl_flag <= 1;
-	end
 
-	if (read && AIN == 2)
-		vbl_flag <= 0;
-
-	if (pclk0) begin
-		if (vram_r_ppudata && ~vram_read_done) begin
+		if (vram_r_ppudata) begin
 			vram_latch <= VRAM_DIN;
 			vram_read_done <= 1;
 		end
-		if (~read)
-			vram_read_done <= 0;
-
-	end
-
-	if (pclk0) begin
 
 		if (decay_high > 0)
 			decay_high <= decay_high - 1'b1;
@@ -1589,6 +1571,9 @@ always @(posedge clk) begin
 		else
 			latched_dout[4:0] <= 5'b00000;
 	end
+
+	if (read && AIN == 2)
+		vbl_flag <= 0;
 
 	case (AIN)
 		2: begin
