@@ -63,8 +63,6 @@ assign exiting_vblank = clr_vbl_ovf_sp0;
 
 assign skip_dot = clr_vbl_ovf_sp0 && ~even_frame_toggle && skip_en && (cycle == 339 && is_rendering);
 
-assign held_reset = reset; // FIXME: This *should* work by holding until vbl_reset but it breaks ny2011 and more.
-
 always @(posedge clk) if (reset) begin
 	cycle <= 9'd0;
 	scanline <= 9'd0;
@@ -72,7 +70,7 @@ always @(posedge clk) if (reset) begin
 	end_of_line <= 0;
 	clr_vbl_ovf_sp0 <= 0;
 	is_pre_render <= 0;
-	//held_reset <= 1;
+	held_reset <= 1;
 
 	case (sys_type)
 		2'b00,2'b11: begin // NTSC/Vs.
@@ -109,7 +107,7 @@ end else begin
 			// Once the scanline counter reaches end of 260, it gets reset to -1.
 			if (scanline == vblank_end_sl) begin
 				scanline <= 9'd511;
-				//held_reset <= 0;
+				held_reset <= 0;
 				is_pre_render <= 1;
 			end else begin
 				scanline <= scanline + 1'd1;
@@ -158,8 +156,6 @@ logic trigger_2007;
 logic trigger_2007_cur;
 logic trigger_2007_latch;
 
-//logic trigger_2007_edge = old_trigger_2007 && ~trigger_2007;
-
 logic write_2006, write_2006_1, write_2006_2;
 
 // VRAM_v reference:
@@ -178,7 +174,6 @@ logic read_n;
 logic write_n;
 logic old_read;
 logic old_write;
-logic old_trigger_2007;
 logic [2:0] last_ain;
 
 assign read_n = ~read & old_read;
@@ -211,7 +206,6 @@ end else begin
 	if (ce) begin
 		write_2006_2 <= write_2006_1;
 		write_2006 <= write_2006_2;
-		old_trigger_2007 <= trigger_2007;
 	end
 
 	if (pclk1) begin
@@ -749,9 +743,6 @@ end else if (ce2) begin
 			end
 		end
 	end
-
-	
-
 end
 
 // Writes to OAMDATA during rendering (on the pre-render line and the visible lines 0-239,

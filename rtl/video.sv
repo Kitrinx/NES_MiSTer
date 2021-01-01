@@ -16,6 +16,8 @@ module video
 	input  [2:0] emphasis,
 	input  [1:0] reticle,
 	input        pal_video,
+	input        show_padding,
+	input        x5,
 
 	input        load_color,
 	input [23:0] load_color_data,
@@ -298,7 +300,9 @@ always @(posedge clk) begin
 	// number of 224 pixels.
 
 	if(pix_ce) begin
-		if(hide_overscan) begin
+		if (x5) begin
+			VBlank <= (vc > (VBL_START - 13)) || (vc < 12);                  // 240 - 16 = 224
+		end else if(hide_overscan) begin
 			VBlank <= (vc > (VBL_START - 9)) || (vc < 8);                  // 240 - 16 = 224
 		end else begin
 			VBlank <= (vc >= VBL_START);                                   // 240 lines
@@ -320,7 +324,6 @@ always @(posedge clk) begin
 	end
 end
 
-localparam show_padding = 1;
 localparam debug_padding = 0;
 localparam HBL_START = 258;
 localparam HBL_END   = 1;

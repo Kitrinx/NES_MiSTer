@@ -972,10 +972,10 @@ wire ce_pix;
 
 video video
 (
-	.*,
 	.clk(clk),
 	.reset(reset_nes),
 	.cnt(nes_ce),
+	.color(color),
 	.hold_reset(hold_reset),
 	.count_v(scanline),
 	.count_h(cycle),
@@ -989,7 +989,17 @@ video video
 	.emphasis(emphasis),
 	.reticle(~status[22] ? reticle : 2'b00),
 	.pal_video(pal_video),
-	.ce_pix(ce_pix)
+	.show_padding(0),
+	.ce_pix(ce_pix),
+	.x5(0),
+
+	.gamma_bus(gamma_bus),
+	.VGA_HS(VGA_HS),
+	.VGA_VS(VGA_VS),
+	.VGA_DE(VGA_DE),
+	.VGA_R(VGA_R),
+	.VGA_G(VGA_G),
+	.VGA_B(VGA_B)
 );
 
 reg ce_out;
