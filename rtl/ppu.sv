@@ -442,7 +442,7 @@ reg [7:0] oam_ex_data;
 reg [2:0] spr_counter;     // Count sprites
 `endif
 
-wire rendering = is_rendering || (PAL && scanline > 260);
+wire rendering = is_rendering;
 wire evaluating = rendering & ~is_pre_render; // AKA "in_visible_range"
 
 reg [6:0] feed_cnt;
@@ -1258,8 +1258,8 @@ assign auto_mask = (MASK == 2'b11) && ~object_clip && ~playfield_clip;
 assign mask_left = clip_area && ((|MASK && ~&MASK) || auto_mask);
 assign mask_right = CYCLE > 247 && MASK == 2'b10;
 assign mask_pal = (|SYS_TYPE && pal_mask); // PAL/Dendy masks scanline 0 and 2 pixels on each side with black.
-assign color1 = (mask_right | mask_left | mask_pal) ? 6'h0E : color3;
-assign color2 = (grayscale ? {color_pipe[1][5:4], 4'b0} : color_pipe[1]);
+assign color2 = (mask_right | mask_left | mask_pal) ? 6'h0E : color3;
+assign color1 = (grayscale ? {color_pipe[1][5:4], 4'b0} : color_pipe[1]);
 
 // Extra Sprites
 `ifdef EXTRA_SPRITES
@@ -1274,7 +1274,7 @@ assign sprite_vram_addr_ex = 0;
 assign INT_n = ~(vbl_flag && vbl_enable);
 assign EXT_OUT = master_mode ? pram_addr[3:0] : EXT_IN;
 assign DOUT = latched_dout;
-assign VRAM_W = write && (AIN == 7) && /*!is_pal_address &&*/ !is_rendering;
+assign VRAM_W = write && (AIN == 7) && !is_pal_address && !is_rendering;
 assign VRAM_DOUT = DIN;
 assign VRAM_R = vram_r_ppudata || (is_rendering && CYCLE[0]);
 assign ALE = is_rendering ? ~CYCLE[0] : ((read_ce || write_ce) && AIN == 7);
