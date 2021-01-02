@@ -125,7 +125,7 @@ endmodule // ClockGen
 module VramGen (
 	input  logic        clk,
 	input  logic        reset,
-	input  logic        ce,
+	input  logic        pclk0,
 	input  logic        pclk1,
 	input  logic        read_ce,
 	input  logic        write_ce,
@@ -156,7 +156,7 @@ logic trigger_2007;
 logic trigger_2007_cur;
 logic trigger_2007_latch;
 
-logic write_2006, write_2006_1, write_2006_2;
+logic write_2006, write_2006_1;
 
 // VRAM_v reference:
 // [14 13 12] [11 10] [9 8 7 6 5] [4 3 2 1 0]
@@ -182,7 +182,6 @@ assign write_n = ~write & old_write;
 always @(posedge clk) if (reset) begin
 	vram_t <= 0;
 	fine_x_scroll <= 0;
-	write_2006_2 <= 0;
 	write_2006_1 <= 0;
 	write_2006 <= 0;
 	pending_2006_trig <= 0;
@@ -201,24 +200,18 @@ end else begin
 	if (pclk1) begin
 		pending_2006_trig <= 0;
 		write_2006_1 <= pending_2006_trig;
-	end
+		write_2006 <= write_2006_1;
 
-	if (ce) begin
-		write_2006_2 <= write_2006_1;
-		write_2006 <= write_2006_2;
-	end
-
-	if (pclk1) begin
 		// Horizontal copy at cycle 257 and rendering OR if delayed 2006 write
 		if (is_rendering && cycle == 256 || write_2006)
 			{vram_v[10], vram_v[4:0]} <= {vram_t[10], vram_t[4:0]};
 
-		// Vertical copy at Cycles 280 to 305 and rendering OR delayed 2006 write
-		if (cycle >= 279 && cycle < 304 && is_pre_render && rendering_enabled || write_2006)
+		// Vertical copy at Cycles 280 to 304 and rendering OR delayed 2006 write
+		if (cycle >= 279 && cycle <= 303 && is_pre_render && rendering_enabled || write_2006)
 			{vram_v[14:11], vram_v[9:5]} <= {vram_t[14:11], vram_t[9:5]};
 
 		// Increment course X scroll from (cycle 0-255 or 320-335) and cycle[2:0] == 7
-		if (is_rendering && ((cycle[2:0] == 7 && (~cycle[8] || (cycle[8] && cycle[6]))) || trigger_2007)) begin
+		if (is_rendering && ((&cycle[2:0] && (~cycle[8] || (cycle >= 320 && cycle <= 335))) || trigger_2007)) begin
 			vram_v[4:0] <= (vram_v[4:0] + 1'd1) & vram_t_mask[4:0];
 			vram_v[10] <= (vram_v[10] ^ &vram_v[4:0]) & vram_t_mask[10];
 		end
@@ -382,8 +375,8 @@ endmodule  // SpriteSet
 
 module OAMEval(
 	input  logic        clk,
-	input  logic        ce,
-	input  logic        ce2,
+	input  logic        pclk0,
+	input  logic        pclk1,
 	input  logic        reset,
 	input  logic        clr_vbl_ovf_sp0,
 	input  logic        is_rendering,    // Set to 1 if evaluations are enabled
@@ -569,7 +562,7 @@ reg old_rendering;
 
 reg overflow;
 
-if (ce) begin
+if (pclk0) begin
 	oam_read_bus <= oam_data;
 	spr_overflow <= overflow;
 end
@@ -597,7 +590,7 @@ if (reset) begin
 	oam_temp_slot_ex <= 0;
 	`endif
 
-end else if (ce2) begin
+end else if (pclk1) begin
 	// I believe technically oam_data represents the ppu's internal data bus and should be assign to
 	// open bus if not driven here, but for now, no behavior relies on this so we can just keep it
 	// simple.
@@ -1196,6 +1189,7 @@ logic read_ce;
 logic write_ce;
 logic use_extra_sprites;
 logic is_rendering_delayed;
+logic [13:0] vram_a_latch;
 
 // Continuous Logic
 logic read;
@@ -1269,7 +1263,7 @@ assign VRAM_W = write && (AIN == 7) && !is_pal_address && !is_rendering;
 assign VRAM_DOUT = DIN;
 assign VRAM_R = vram_r_ppudata || (is_rendering && CYCLE[0]);
 assign ALE = is_rendering ? ~CYCLE[0] : ((read_ce || write_ce) && AIN == 7);
-assign VRAM_AB = vram_a;
+assign VRAM_AB = pclk0 ? vram_a : vram_a_latch;
 assign VRAM_A_EX = {1'b0, sprite_vram_addr_ex};
 assign COLOR = color1;
 
@@ -1286,7 +1280,7 @@ always_comb begin
 		else
 			VRAM_R_EX = 0;
 
-		if (CYCLE[2:1] == 0 || CYCLE >= 338)
+		if (CYCLE[2:1] == 0 || at_last_cycle_group)
 			vram_a = {2'b10, vram_v[11:0]};                                     // Name Table
 		else if (CYCLE[2:1] == 1)
 			vram_a = {2'b10, vram_v[11:10], 4'b1111, vram_v[9:7], vram_v[4:2]}; // Attribute table
@@ -1356,7 +1350,7 @@ ClockGen clock(
 VramGen vram_v0(
 	.clk                 (clk),
 	.reset               (held_reset),
-	.ce                  (pclk0),
+	.pclk0               (pclk0),
 	.pclk1               (pclk1),
 	.ppu_incr            (addr_inc),
 	.read_ce             (read_ce),
@@ -1376,8 +1370,8 @@ VramGen vram_v0(
 
 OAMEval spriteeval (
 	.clk               (clk),
-	.ce                (pclk0),
-	.ce2               (pclk1),
+	.pclk0             (pclk0),
+	.pclk1             (pclk1),
 	.reset             (held_reset),
 	.clr_vbl_ovf_sp0   (clr_vbl_ovf_sp0),
 	.is_rendering      (is_rendering_delayed),
@@ -1486,6 +1480,8 @@ always @(posedge clk) begin
 	write_old <= write;
 
 	if (pclk0) begin
+		vram_a_latch <= vram_a;
+
 		if (
 			~CYCLE[8]           &&    // X Pixel 0..255
 			~&CYCLE[7:0]        &&    // X pixel != 255
