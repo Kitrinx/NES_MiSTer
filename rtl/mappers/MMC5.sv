@@ -86,7 +86,6 @@ reg [7:0] expansion_ram[0:1023]; // Block RAM, otherwise we need to time multipl
 reg [7:0] last_read_ram;
 reg [7:0] last_read_exattr;
 reg [7:0] last_read_vram;
-reg last_chr_read;
 
 // unpack ppu flags
 //reg display_enable;
