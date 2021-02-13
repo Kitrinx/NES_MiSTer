@@ -130,7 +130,7 @@ module emu
 assign ADC_BUS  = 'Z;
 
 assign AUDIO_S   = 0;
-assign AUDIO_L   = |mute_cnt ? 16'd0 : sample[15:0];
+assign AUDIO_L   = sample[15:0];
 assign AUDIO_R   = AUDIO_L;
 assign AUDIO_MIX = 0;
 
@@ -152,7 +152,7 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXX XX XX XXXXXXXXXXXXXXXXXXXX XXX
+// XXXXX XX XX XXXXXXXXXXXXXXXXXXXX XXXXX
 
 `include "build_id.v"
 parameter CONF_STR = {
@@ -198,7 +198,9 @@ parameter CONF_STR2 = {
 	"P2OL,Zapper Trigger,Mouse,Joystick;",
 	"P2OM,Crosshairs,On,Off;",
 
-	"-;",
+	"P3,Advanced;",
+	"P3-;",
+	"P3o34,PPU Offset,0,1,2,3;",
 	"R0,Reset;",
 	"J1,A,B,Select,Start,FDS,Mic,Zapper/Vaus Btn,PP/Mat 1,PP/Mat 2,PP/Mat 3,PP/Mat 4,PP/Mat 5,PP/Mat 6,PP/Mat 7,PP/Mat 8,PP/Mat 9,PP/Mat 10,PP/Mat 11,PP/Mat 12;",
 	"jn,A,B,Select,Start,L,,R|P;",
@@ -719,6 +721,7 @@ NES nes (
 	.cold_reset      (downloading & (type_fds | type_nes)),
 	.sys_type        (status[24:23]),
 	.nes_div         (nes_ce),
+	.ppu_offset      (status[36:35]),
 	.mapper_flags    (downloading ? 32'd0 : mapper_flags),
 	.gg              (status[20]),
 	.gg_code         (gg_code),
@@ -989,9 +992,8 @@ video video
 	.emphasis(emphasis),
 	.reticle(~status[22] ? reticle : 2'b00),
 	.pal_video(pal_video),
-	.show_padding(0),
+	.show_padding(1),
 	.ce_pix(ce_pix),
-	.x5(0),
 
 	.gamma_bus(gamma_bus),
 	.VGA_HS(VGA_HS),
@@ -1182,10 +1184,10 @@ wire [7:0] chrrom = ines[5];	// Number of 8192 byte character ROM pages (0 indic
 wire [3:0] chrram = ines[11][3:0]; // NES 2.0 CHR-RAM size shift count (64 << count)
 wire has_chr_ram = ~is_nes20 ? (chrrom == 0) : |chrram;
 
-assign mem_data = (state == S_CLEARRAM || (~copybios && state == S_COPYBIOS)) ? 8'h00 : indata;
+assign mem_data = (state == S_CLEAR || state == S_CLEARRAM || (~copybios && state == S_COPYBIOS)) ? 8'h00 : indata;
 assign mem_write = (((bytes_left != 0) && (state == S_LOADPRG || state == S_LOADCHR || state == S_LOADEXTRA)
                     || (downloading && (state == S_LOADHEADER || state == S_LOADFDS || state == S_LOADNSFH || state == S_LOADNSFD))) && indata_clk)
-						 || ((bytes_left != 0) && ((state == S_CLEARRAM) || (state == S_COPYBIOS) || (state == S_COPYPLAY)) && clearclk == 4'h2);
+						 || ((bytes_left != 0) && ((state == S_CLEAR) || (state == S_CLEARRAM) || (state == S_COPYBIOS) || (state == S_COPYPLAY)) && clearclk == 4'h2);
 
 // detect iNES2.0 compliant header
 wire is_nes20 = (ines[7][3:2] == 2'b10);
@@ -1253,7 +1255,7 @@ assign mapper_flags = {1'b0, piano, prgram, has_saves, ines2mapper, ines[6][3], 
 reg [3:0] clearclk; //Wait for SDRAM
 reg copybios;
 
-typedef enum bit [3:0] { S_LOADHEADER, S_LOADPRG, S_LOADCHR, S_LOADEXTRA, S_LOADFDS, S_ERROR, S_CLEARRAM, S_COPYBIOS, S_LOADNSFH, S_LOADNSFD, S_COPYPLAY, S_DONE } mystate;
+typedef enum bit [3:0] {S_CLEAR, S_LOADHEADER, S_LOADPRG, S_LOADCHR, S_LOADEXTRA, S_LOADFDS, S_ERROR, S_CLEARRAM, S_COPYBIOS, S_LOADNSFH, S_LOADNSFD, S_COPYPLAY, S_DONE } mystate;
 mystate state;
 
 wire type_bios = filetype[0];
@@ -1274,9 +1276,32 @@ always @(posedge clk) begin
 		            type_nsf ? 25'b0_0000_0000_0000_0001_0000_0000   // Address for NSF Header (0x80 bytes)
 									: 25'b0_0000_0000_0000_0000_0000_0000;  // Address for FDS : BIOS/PRG
 		copybios <= 0;
+
+		// mem_addr <= 25'b0_0000_0000_0000_0000_0000_0000;
+		// bytes_left <= 22'h3FFFFF;
+		// busy <= 1;
+		// state <= S_CLEAR;
+		// clearclk <= 4'h0;
 	end else begin
 		case(state)
 		// Read 16 bytes of ines header
+		S_CLEAR: begin // Read the next |bytes_left| bytes into |mem_addr|
+			clearclk <= clearclk + 4'h1;
+			if (bytes_left != 22'h0) begin
+				if (clearclk == 4'hF) begin
+					bytes_left <= bytes_left - 1'd1;
+					mem_addr <= mem_addr + 1'd1;
+				end
+			end else begin
+				state <= S_LOADHEADER;
+				mem_addr <= type_fds ? 25'b0_0011_1100_0000_0000_0001_0000 :
+					type_nsf ? 25'b0_0000_0000_0000_0001_0000_0000   // Address for NSF Header (0x80 bytes)
+					: 25'b0_0000_0000_0000_0000_0000_0000;  // Address for FDS : BIOS/PRG
+				copybios <= 0;
+				clearclk <= 0;
+				busy <= 0;
+			end
+		end
 		S_LOADHEADER:
 			if (indata_clk) begin
 			  error <= 0;

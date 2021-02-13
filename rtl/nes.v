@@ -69,10 +69,13 @@ assign aout = dmc_ack ? dmc_dma_addr : !odd_cycle ? sprite_dma_addr : 16'h2004;
 
 endmodule
 
+//`define USE_NEW_CLOCKS = 1
+
 module NES(
 	input         clk,
 	input         reset_nes,
 	input         cold_reset,
+	input   [1:0] ppu_offset,
 	input   [1:0] sys_type,
 	output  [1:0] nes_div,
 	input  [31:0] mapper_flags,
@@ -136,26 +139,15 @@ module NES(
 // CPU ----M------C----M------C----M------C----M------C
 // PPU ---P---P---P---P---P---P---P---P---P---P---P---P
 //  M: M2 Tick, C: CPU Tick, P: PPU Tick -: Idle Cycle
-//
-// On Mister, we must pre-fetch data from memory 4 cycles before it is needed.
-// Memory requests are aligned to the PPU clock and there are two types: CPU pre-fetch
-// and PPU pre-fetch. The CPU pre-fetch needs to be completed before the end of the CPU cycle, and
-// the PPU pre-fetch needs to be completed before each PPU CE is ticked.
-// The PPU_CE that acknowledges reads and writes always occurs after the M2 rising edge, and cart/mapper
-// CE's are always triggered on the rising edge of M2, which means that PPU will always see
-// any changes made by the cart mappers. Because the mapper on MiSTer is capable of changing the data that
-// is given to the CPU (banking, etc) the best time to run it is the first PPU cycle where the data from the
-// CPU is visible on the bus.
-//
-// The obvious issue is that the CPU and PPU pre-fetches will collide. Fortunately, because Nintendo
-// wanted to save pins, the ppu has to take two PPU ticks for every read, meaning there will always be
-// a minimum of one free PPU cycle in which to fit the CPU read. This does however create the issue that
-// we always need perfect alignment.
-//
-// Therefore, we can dervive the following order of operations:
-// - CPU pre-fetch should happen during first free PPU tick in a CPU cycle.
-// - Cart CE should happen on the second PPU tick in a CPU cycle always
-// - PPU read/write should happen on the last PPU tick in a CPU cycle (usually third)
+
+
+// 10ns) 0  40  80 120 160 200 240 280 320 360 400 440 480 520 560 600
+//    phi0 \___________________________/^^^^^^^^^^^^^^^^^^^^^^^^^^^\____ (assumed)
+//      M2 \____________________/^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\____
+// /ROMSEL __/^^^^^^^^^^^^^^^^^^^^\__________________________________/^^ (when relevant)
+//     R/W ^^^^^\_______________________________________________________ (read to write cycle)
+//      D0 ???????ZZZZZZZZZZZZZZZZZZZZZZZZ^^^^^^^^^^^^^^^^^^^^^^^^^^^^??
+//     R/W ____________/^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ (write to read cycle)
 
 assign nes_div = div_sys;
 assign apu_ce = cpu_ce;
@@ -167,6 +159,115 @@ wire [7:0] cpu_dout;
 // master cycles and low for 6 master cycles. It is considered active when low or "even".
 reg odd_or_even = 1; // 1 == odd, 0 == even
 
+`ifdef USE_NEW_CLOCKS
+
+// Clock Dividers
+localparam div_cpu_n = 5'd11;
+localparam div_ppu_n = 3'd3;
+localparam div_phi2_n = 5'd4;
+// Counters
+reg [4:0] div_cpu = 5'd4;
+reg [2:0] div_ppu = 3'd0;
+reg [1:0] div_sys = 2'd3;
+
+reg cpu_ce;
+reg ppu_ce;
+wire cart_ce = (cart_pre & ppu_ce); // First PPU cycle where cpu data is visible.
+reg phi2;
+
+// Signals
+wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
+
+// The infamous NES jitter is important for accuracy, but wreks havok on modern devices and scalers,
+// so what I do here is pause the whole system for one PPU clock and insert a "fake" ppu clock to
+// replace the missing pixel. Thus the system runs accurately (ableit a few nanoseconds per frame slower)
+// but all video devices stay happy.
+wire skip_pixel;
+
+wire use_fake_h = skip_pixel || freeze_clocks > 1;
+reg [1:0] ppu_tick = 0;
+
+reg [1:0] last_sys_type;
+reg [2:0] cpu_tick_count;
+
+// Since we don't have to worry about carts, we can make using PAL mode much more easy for ourselves
+// by pausing the cpu for one ppu cycle every five. This manages to maintain the correct timing
+// without mis-aligning the ppu/cpu ticks.
+wire freeze_cpu = (cpu_tick_count == 4) && (ppu_tick == 2);
+
+reg hold_reset = 0;
+reg bootvector_flag;
+wire cpu_reset = reset_nes | hold_reset;
+wire reset = cpu_reset | bootvector_flag;
+
+wire freeze_clocks = |freeze_timer;
+reg [2:0] freeze_timer;
+
+always @(posedge clk) begin : clock_divs
+	reg old_freeze = 0;
+	reg old_reset = 0;
+
+	// if (reset_nes)
+	// 	hold_reset <= 1;
+	old_reset <= reset_nes;
+
+	{cpu_ce, ppu_ce} <= 0;
+	old_freeze <= skip_pixel;
+
+	if (~old_freeze && skip_pixel)
+		freeze_timer <= div_ppu_n + 1;
+	
+	if (freeze_timer)
+		freeze_timer <= freeze_timer - 1'd1;
+
+	if (~freeze_clocks && ~old_reset) begin
+		div_cpu <= div_cpu + (freeze_cpu ? 1'd0 : 1'd1);
+		div_ppu <= div_ppu + 1'd1;
+		if (div_cpu == div_cpu_n && ~freeze_cpu) begin
+			div_cpu <= 0;
+			cpu_ce <= 1;
+			phi2 <= 0;
+		end
+		if (div_cpu == div_phi2_n) begin
+			phi2 <= 1;
+		end
+
+		if (div_ppu == div_ppu_n) begin
+			div_ppu <= 0;
+			ppu_ce <= 1;
+		end
+	end
+
+	if (ppu_ce)
+		ppu_tick <= ppu_tick + 1'b1;
+
+	if (cpu_ce) begin
+		hold_reset <= 0;
+		if (sys_type[0])
+			cpu_tick_count <= cpu_tick_count[2] ? 3'd0 : cpu_tick_count + 1'b1;
+		odd_or_even <= ~odd_or_even;
+		bootvector_flag <= 0;
+		ppu_tick <= 0;
+	end
+
+	div_sys <= div_sys + 1'b1;
+
+	if (old_reset && ~reset_nes) begin
+		div_sys <= ppu_offset + 1'd1;
+		phi2 <= 0;
+		old_freeze <= 0;
+		freeze_timer <= 0;
+		div_cpu <= 5'd4;
+		div_ppu <= ppu_offset;
+		bootvector_flag <= 1;
+		odd_or_even <= 1;
+		ppu_tick <= 0;
+		cpu_tick_count <= 0;
+	end
+end
+
+
+`else
 // Clock Dividers
 localparam div_cpu_n = 5'd12;
 localparam div_ppu_n = 3'd4;
@@ -186,7 +287,11 @@ wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 // wire ppu_read  = (ppu_tick == (cpu_tick_count[2] ? 2 : 1));
 // wire ppu_write = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 
-wire phi2 = (div_cpu > 4 && div_cpu < div_cpu_n);
+// NES uses phi2 for APU related functions, but M2 for PPU.
+wire phi2 = (div_cpu > 6);
+wire m2 = (div_cpu > 5);
+// wire phi2 = (div_cpu > 5 && div_cpu < div_cpu_n);
+// wire m2 = (div_cpu > 4 && div_cpu < div_cpu_n);
 
 // The infamous NES jitter is important for accuracy, but wreks havok on modern devices and scalers,
 // so what I do here is pause the whole system for one PPU clock and insert a "fake" ppu clock to
@@ -245,7 +350,6 @@ always @(posedge clk) begin
 		faux_pixel_cnt <= 8;
 	end
 
-
 	if (cpu_reset) begin
 		bootvector_flag <= 1;
 		odd_or_even <= 1;
@@ -263,8 +367,7 @@ always @(posedge clk) begin
 		cpu_tick_count <= 0;
 	end
 end
-
-
+`endif
 /**********************************************************/
 /*************              CPU             ***************/
 /**********************************************************/
@@ -347,7 +450,7 @@ APU apu(
 	.PAL            (sys_type[0]),
 	.ce             (apu_ce),
 	.reset          (reset),
-	.cold_reset     (cold_reset),
+	.cold_reset     (cold_reset | hold_reset),
 	.ADDR           (addr[4:0]),
 	.RW             (cpu_rnw),
 	.DIN            (dbus),
@@ -419,7 +522,7 @@ PPU ppu(
 	.clk              (clk),
 	.CE               (ppu_ce),
 	.CE2              (ppu_ce2),
-	.CS_n             (~(ppu_cs && phi2)),
+	.CS_n             (~(ppu_cs && m2)),
 	.RESET            (reset),
 	.SYS_TYPE         (sys_type),
 	.COLOR            (color),
@@ -553,6 +656,7 @@ reg [7:0] open_bus_data;
 
 always @(posedge clk) begin
 	open_bus_data <= from_data_bus;
+	if (reset_nes) open_bus_data <= 0;
 end
 
 assign from_data_bus = genie_ovr ? genie_data : raw_data_bus;
@@ -560,9 +664,7 @@ assign from_data_bus = genie_ovr ? genie_data : raw_data_bus;
 reg [7:0] raw_data_bus;
 
 always @* begin
-	if (reset)
-		raw_data_bus = 0;
-	else if (apu_cs) begin
+	if (apu_cs) begin
 		if (joypad1_cs)
 			raw_data_bus = {open_bus_data[7:5], joypad1_data};
 		else if (joypad2_cs)

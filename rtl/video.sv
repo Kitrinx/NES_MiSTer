@@ -11,13 +11,12 @@ module video
 	input  [8:0] count_v,
 	input        forced_scandoubler,
 	input  [2:0] scale,
-	input        hide_overscan,
+	input  [1:0] hide_overscan,
 	input  [3:0] palette,
 	input  [2:0] emphasis,
 	input  [1:0] reticle,
 	input        pal_video,
 	input        show_padding,
-	input        x5,
 
 	input        load_color,
 	input [23:0] load_color_data,
@@ -40,8 +39,8 @@ reg pix_ce, pix_ce_n;
 wire [5:0] color_ef = reticle[0] ? (reticle[1] ? 6'h21 : 6'h15) : color;
 
 always @(negedge clk) begin
-	pix_ce   <= ~cnt[1] & ~cnt[0];
-	pix_ce_n <=  cnt[1] & ~cnt[0];
+	pix_ce   <= cnt == 0;
+	pix_ce_n <= cnt == 2;
 end
 
 // Smooth palette from FirebrandX
@@ -291,18 +290,14 @@ always @(posedge clk) begin
 		old_count_v <= count_v;
 	end
 
-	// The NES and SNES proper resolutions are 280 pixels wide, and 240 lines high. Only 256 of these pixels per line
-	// are drawn with image data, but the real PPU padded the rest with color 0 to make the aspect ratio correct, since
-	// they anticipated the overscan. This padding MUST be considered when scaling the image to 4:3 AR.
-	// http://wiki.nesdev.com/w/index.php?title=Overscan#For_emulator_developers
 
-	// Overscan is simply a zoom-in, and most emulators will take off 8 from the top and bottom to reach the magic
-	// number of 224 pixels.
+
+	// 1 pixel of greyscale, 15 pixels of border, 256 pixels of video, 11 pixels of border
 
 	if(pix_ce) begin
-		if (x5) begin
+		if (hide_overscan[1]) begin // For 5x 1080 scaling
 			VBlank <= (vc > (VBL_START - 13)) || (vc < 12);                  // 240 - 16 = 224
-		end else if(hide_overscan) begin
+		end else if(hide_overscan[0]) begin
 			VBlank <= (vc > (VBL_START - 9)) || (vc < 8);                  // 240 - 16 = 224
 		end else begin
 			VBlank <= (vc >= VBL_START);                                   // 240 lines
@@ -320,17 +315,17 @@ always @(posedge clk) begin
 			VSync <= ((vc >= vsync_start) && (vc < vsync_start+3));
 		end
 
-		if(hc == 305) HSync <= 0;
+		if(hc == 304) HSync <= 0;
 	end
 end
 
 localparam debug_padding = 0;
 localparam HBL_START = 258;
 localparam HBL_END   = 1;
-localparam HBL_START_P = 270;
+localparam HBL_START_P = 271;
 localparam HBL_END_P   = 329;
-localparam HBL_START_D = 275;
-localparam HBL_END_D   = 282;
+localparam HBL_START_D = 279;
+localparam HBL_END_D   = 306;
 localparam VBL_START = 240;
 localparam VBL_END   = 511;
 
