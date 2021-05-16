@@ -17,7 +17,10 @@ module video
 	input  [1:0] reticle,
 	input        pal_video,
 	input        show_padding,
-
+	input        vblank_orig,
+	input        hblank_orig,
+	input        vsync_orig,
+	input        hsync_orig,
 	input        load_color,
 	input [23:0] load_color_data,
 	input  [5:0] load_color_index,
@@ -322,8 +325,8 @@ end
 localparam debug_padding = 0;
 localparam HBL_START = 258;
 localparam HBL_END   = 1;
-localparam HBL_START_P = 271;
-localparam HBL_END_P   = 329;
+localparam HBL_START_P = 270;
+localparam HBL_END_P   = 326;
 localparam HBL_START_D = 279;
 localparam HBL_END_D   = 306;
 localparam VBL_START = 240;
@@ -353,8 +356,10 @@ video_mixer #(260, 0, 1) video_mixer
 	.ce_pix(pix_ce),
 	.ce_pix_out(ce_pix),
 	
-	.HBlank(HBlank_r),
-	.VBlank(VBlank_r),
+	.HBlank(reset ? HBlank_r : hblank_orig),
+	.VBlank(reset ? VBlank_r : vblank_orig),
+	.HSync(reset ? HSync : hsync_orig),
+	.VSync(reset ? VSync : vsync_orig),
 
 	.scanlines(0),
 	.hq2x(scale==1),

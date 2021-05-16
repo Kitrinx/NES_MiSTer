@@ -740,6 +740,10 @@ NES nes (
 	.cycle           (cycle),
 	.scanline        (scanline),
 	.mask            (status[28:27]),
+	.vsync           (vsync),
+	.hsync           (hsync),
+	.hblank          (hblank),
+	.vblank          (vblank),
 	// User Input
 	.joypad_out      (joypad_out),
 	.joypad_clock    (joypad_clock),
@@ -973,6 +977,8 @@ wire [1:0] reticle;
 wire hold_reset;
 wire ce_pix;
 
+wire vblank, hblank, vsync, hsync;
+
 video video
 (
 	.clk(clk),
@@ -994,6 +1000,10 @@ video video
 	.pal_video(pal_video),
 	.show_padding(1),
 	.ce_pix(ce_pix),
+	.vblank_orig(vblank),
+	.hblank_orig(hblank),
+	.vsync_orig(vsync),
+	.hsync_orig(hsync),
 
 	.gamma_bus(gamma_bus),
 	.VGA_HS(VGA_HS),

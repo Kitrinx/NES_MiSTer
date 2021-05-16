@@ -80,7 +80,6 @@ module NES(
 	output  [1:0] nes_div,
 	input  [31:0] mapper_flags,
 	output [15:0] sample,         // sample generated from APU
-	output  [5:0] color,          // pixel generated from PPU
 	output  [1:0] joypad_clock,   // Set to 1 for each joypad to clock it.
 	output  [2:0] joypad_out,     // Set to 1 to strobe joypads. Then set to zero to keep the value.
 	input   [4:0] joypad1_data,   // Port1
@@ -92,6 +91,13 @@ module NES(
 	input   [4:0] audio_channels, // Enabled audio channels
 	input         ex_sprites,
 	input   [1:0] mask,
+
+	// Video output
+	output  [5:0] color,          // pixel generated from PPU
+	output        vsync,
+	output        hsync,
+	output        vblank,
+	output        hblank,
 
 	// Access signals for the SDRAM.
 	output [24:0] cpumem_addr,
@@ -176,7 +182,8 @@ wire cart_ce = (cart_pre & ppu_ce); // First PPU cycle where cpu data is visible
 reg phi2;
 
 // Signals
-wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
+wire cart_pre  = cart_pre_r;//~phi2;//(ppu_tick == (cpu_tick_count[2] ? 1 : 0));
+reg cart_pre_r = 0;
 
 // The infamous NES jitter is important for accuracy, but wreks havok on modern devices and scalers,
 // so what I do here is pause the whole system for one PPU clock and insert a "fake" ppu clock to
@@ -198,7 +205,7 @@ wire freeze_cpu = (cpu_tick_count == 4) && (ppu_tick == 2);
 reg hold_reset = 0;
 reg bootvector_flag;
 wire cpu_reset = reset_nes | hold_reset;
-wire reset = cpu_reset | bootvector_flag;
+wire reset = old_reset | cpu_reset | bootvector_flag;
 
 wire freeze_clocks = |freeze_timer;
 reg [2:0] freeze_timer;
@@ -226,10 +233,12 @@ always @(posedge clk) begin : clock_divs
 		if (div_cpu == div_cpu_n && ~freeze_cpu) begin
 			div_cpu <= 0;
 			cpu_ce <= 1;
-			phi2 <= 0;
 		end
 		if (div_cpu == div_phi2_n) begin
 			phi2 <= 1;
+		end
+		if (cart_ce) begin
+			cart_pre_r <= 0;
 		end
 
 		if (div_ppu == div_ppu_n) begin
@@ -242,6 +251,8 @@ always @(posedge clk) begin : clock_divs
 		ppu_tick <= ppu_tick + 1'b1;
 
 	if (cpu_ce) begin
+		phi2 <= 0;
+		cart_pre_r <= 1;
 		hold_reset <= 0;
 		if (sys_type[0])
 			cpu_tick_count <= cpu_tick_count[2] ? 3'd0 : cpu_tick_count + 1'b1;
@@ -288,8 +299,8 @@ wire cart_pre  = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 // wire ppu_write = (ppu_tick == (cpu_tick_count[2] ? 1 : 0));
 
 // NES uses phi2 for APU related functions, but M2 for PPU.
-wire phi2 = (div_cpu > 6);
-wire m2 = (div_cpu > 5);
+wire phi2 = (div_cpu > 6) && ~cpu_ce;
+wire m2 = (div_cpu > 4) && ~cpu_ce; // M2 should be visible AT clock cycle 5 (technically goes high after 4.5 cycles)
 // wire phi2 = (div_cpu > 5 && div_cpu < div_cpu_n);
 // wire m2 = (div_cpu > 4 && div_cpu < div_cpu_n);
 
@@ -545,7 +556,11 @@ PPU ppu(
 	.SHORT_FRAME      (skip_pixel),
 	.EXTRA_SPRITES    (ex_sprites),
 	.MASK             (mask),
-	.EXT_IN           (4'b0000)
+	.EXT_IN           (4'b0000),
+	.HSYNC            (hsync),
+	.VSYNC            (vsync),
+	.HBLANK           (hblank),
+	.VBLANK           (vblank)
 );
 
 
